@@ -8,6 +8,7 @@ data class MetaDetails(
     val type: String,
     val name: String,
     val imdbId: String? = null,
+    val tvdbId: String? = null,
     val poster: String? = null,
     val background: String? = null,
     val logo: String? = null,
@@ -109,6 +110,9 @@ data class MetaVideo(
     val imdbRating: Double? = null,
     val rating: Double? = null,
     val streams: List<StreamItem> = emptyList(),
+    val imdbId: String? = null,
+    val imdbSeason: Int? = null,
+    val imdbEpisode: Int? = null,
 )
 
 data class MetaDetailsUiState(

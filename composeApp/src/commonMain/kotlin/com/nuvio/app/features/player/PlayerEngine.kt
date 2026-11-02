@@ -5,6 +5,7 @@ import androidx.compose.ui.Modifier
 
 interface PlayerEngineController {
     val playbackEngine: AndroidPlaybackEngine? get() = null
+    val supportsNightMode: Boolean get() = true
     fun play()
     fun pause()
     fun seekTo(positionMs: Long)
@@ -12,6 +13,8 @@ interface PlayerEngineController {
     fun retry()
     fun isPictureInPictureSupported(): Boolean = false
     fun startPictureInPicture() {}
+    fun setVideoZoom(scale: Float) {}
+    fun showCastDialog() {}
     fun setPlaybackSpeed(speed: Float)
     fun currentPlayerVolume(): PlayerAudioLevel = PlayerAudioLevel(
         fraction = 1f,
@@ -56,6 +59,8 @@ interface PlayerEngineController {
     fun updateNowPlayingMetadata(info: PlayerNowPlayingInfo) {}
     fun clearNowPlayingInfo() {}
     suspend fun getMediaInfo(): PlayerMediaInfo = PlayerMediaInfo()
+    /** The loaded file's chapters, unsorted; empty when the engine cannot read them. */
+    suspend fun getChapters(): List<PlayerChapter> = emptyList()
 }
 
 internal fun sanitizePlaybackHeaders(headers: Map<String, String>?): Map<String, String> {

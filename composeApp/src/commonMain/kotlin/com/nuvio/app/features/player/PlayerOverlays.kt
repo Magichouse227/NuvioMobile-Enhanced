@@ -22,6 +22,7 @@ import androidx.compose.material.icons.rounded.Brightness6
 import androidx.compose.material.icons.rounded.FastForward
 import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Speed
+import androidx.compose.material.icons.rounded.ZoomOutMap
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -53,6 +54,7 @@ import nuvio.composeapp.generated.resources.compose_player_youre_watching
 import org.jetbrains.compose.resources.StringResource
 import org.jetbrains.compose.resources.stringResource
 import kotlin.math.max
+import com.nuvio.app.core.ui.glass.ambientLiquidGlass
 
 internal enum class GestureFeedbackIcon {
     Speed,
@@ -61,6 +63,7 @@ internal enum class GestureFeedbackIcon {
     VolumeMuted,
     SeekForward,
     SeekBackward,
+    VideoZoom,
 }
 
 internal data class GestureFeedbackState(
@@ -99,6 +102,7 @@ internal fun GestureFeedbackPill(
         GestureFeedbackIcon.VolumeMuted -> Icons.AutoMirrored.Rounded.VolumeOff
         GestureFeedbackIcon.SeekForward -> Icons.Rounded.FastForward
         GestureFeedbackIcon.SeekBackward -> Icons.Rounded.FastRewind
+        GestureFeedbackIcon.VideoZoom -> Icons.Rounded.ZoomOutMap
     }
     val iconTint = if (feedback.isDanger) Color(0xFFFFC1C1) else Color.White
     val messageText = feedback.messageRes?.let { resource ->
@@ -111,7 +115,14 @@ internal fun GestureFeedbackPill(
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(24.dp))
-            .background(backgroundColor)
+            .ambientLiquidGlass(
+                shape = RoundedCornerShape(24.dp),
+                tint = backgroundColor.copy(alpha = backgroundColor.alpha * 0.7f),
+                fallback = backgroundColor,
+                blurRadius = 16.dp,
+                refractionHeight = 10.dp,
+                refractionAmount = 14.dp,
+            )
             .padding(horizontal = 12.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,

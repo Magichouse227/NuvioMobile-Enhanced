@@ -100,7 +100,7 @@ fun NuvioScreen(
             top = topPadding ?: tokens.spacing.screenTop + statusBarTop + nuvioPlatformExtraTopPadding,
             end = horizontalPadding,
             bottom = nuvioSafeBottomPadding(tokens.spacing.screenBottom),
-        ),
+        ).withVerticalBar(),
         verticalArrangement = Arrangement.spacedBy(tokens.spacing.listGap),
         content = content,
     )
@@ -353,7 +353,9 @@ fun NuvioInputField(
     onValueChange: (String) -> Unit,
     placeholder: String,
     modifier: Modifier = Modifier,
+    shape: Shape = MaterialTheme.nuvio.shapes.compactCard,
     trailingContent: (@Composable (() -> Unit))? = null,
+    containerColor: Color = MaterialTheme.nuvio.colors.surfaceCard,
 ) {
     val tokens = MaterialTheme.nuvio
     OutlinedTextField(
@@ -361,7 +363,7 @@ fun NuvioInputField(
         onValueChange = onValueChange,
         modifier = modifier.fillMaxWidth(),
         singleLine = true,
-        shape = RoundedCornerShape(NuvioTokens.Radius.lg),
+        shape = shape,
         placeholder = {
             Text(
                 text = placeholder,
@@ -374,8 +376,8 @@ fun NuvioInputField(
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = tokens.colors.borderFocus,
             unfocusedBorderColor = tokens.colors.borderDefault,
-            focusedContainerColor = tokens.colors.surfaceCard,
-            unfocusedContainerColor = tokens.colors.surfaceCard,
+            focusedContainerColor = containerColor,
+            unfocusedContainerColor = containerColor,
             cursorColor = tokens.colors.accent,
         ),
     )
