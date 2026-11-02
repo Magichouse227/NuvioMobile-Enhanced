@@ -7,8 +7,10 @@ import org.gradle.api.tasks.InputFile
 import org.gradle.api.tasks.Optional
 import org.gradle.api.tasks.OutputDirectory
 import org.gradle.api.tasks.TaskAction
+import org.gradle.process.CommandLineArgumentProvider
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.plugin.mpp.TestExecutable
+import org.jetbrains.kotlin.gradle.targets.native.tasks.KotlinNativeSimulatorTest
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompilationTask
 import java.util.Properties
 
@@ -411,12 +413,18 @@ kotlin {
             baseName = "ComposeApp"
             isStatic = true
             freeCompilerArgs += listOf("-Xbinary=bundleId=$iosFrameworkBundleId")
+
+            // Biometric authentication and the profile PIN cache use Apple Security,
+            // LocalAuthentication, and CoreFoundation APIs on every iOS distribution.
+            linkerOpts(
+                "-framework", "Security",
+                "-framework", "LocalAuthentication",
+                "-framework", "CoreFoundation",
+            )
             if (iosDistribution == "full") {
                 linkerOpts(
                     "-lc++",
-                    "-framework", "Security",
                     "-framework", "SystemConfiguration",
-                    "-framework", "CoreFoundation",
                 )
             }
         }
@@ -447,13 +455,17 @@ kotlin {
                 implementation(libs.androidx.activity.compose)
                 implementation(libs.androidx.core.splashscreen)
                 implementation(libs.androidx.work.runtime)
+                implementation(libs.androidx.biometric)
                 implementation(libs.coil.gif)
                 implementation("androidx.recyclerview:recyclerview:1.4.0")
                 implementation("com.squareup.okhttp3:okhttp:4.12.0")
                 implementation("com.google.code.gson:gson:2.11.0")
-                implementation("io.github.peerless2012:ass-media:0.5.1")
+                // libass - atlas-based subtitle rendering (from NuvioMedia/nuvio-libass)
+                implementation(files("libs/nuvio-libass-release.aar"))
                 implementation(libs.ktor.client.okhttp)
                 implementation(libs.sentry.android)
+                implementation(libs.play.services.cast.framework)
+                implementation(libs.androidx.mediarouter)
                 implementation(libs.androidx.media3.exoplayer.hls)
                 implementation(libs.androidx.media3.exoplayer.dash)
                 implementation(libs.androidx.media3.exoplayer.smoothstreaming)
@@ -462,6 +474,7 @@ kotlin {
                 implementation(libs.androidx.media3.database)
                 implementation(libs.androidx.media3.datasource.okhttp)
                 implementation(libs.androidx.media3.decoder)
+                implementation(libs.androidx.media3.effect)
                 implementation(libs.androidx.media3.session)
                 implementation(libs.androidx.media3.common)
                 implementation(libs.androidx.media3.container)
@@ -499,7 +512,7 @@ kotlin {
             implementation("io.coil-kt.coil3:coil-svg:${libs.versions.coil.get()}") {
                 exclude(group = "org.jetbrains.skiko", module = "skiko")
             }
-            implementation("dev.chrisbanes.haze:haze:1.7.2")
+            implementation(libs.kyant.backdrop)
             implementation(libs.compose.runtime)
             implementation(libs.compose.foundation)
             implementation(libs.compose.material3)
@@ -523,13 +536,27 @@ kotlin {
             implementation(libs.supabase.auth)
             implementation(libs.supabase.functions)
             implementation(libs.supabase.storage)
+            implementation(libs.supabase.realtime)
             implementation(libs.reorderable)
         }
         commonTest.dependencies {
             implementation(libs.kotlin.test)
             implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:${libs.versions.kotlinx.coroutines.get()}")
+            implementation("io.ktor:ktor-client-mock:${libs.versions.ktor.get()}")
         }
     }
+}
+
+val bootIosTestSimulator by tasks.registering(Exec::class) {
+    val device = tasks.named<KotlinNativeSimulatorTest>("iosSimulatorArm64Test").flatMap { it.device }
+    commandLine("xcrun", "simctl", "boot")
+    argumentProviders.add(CommandLineArgumentProvider { listOf(device.get()) })
+    isIgnoreExitValue = true
+}
+
+tasks.withType<KotlinNativeSimulatorTest>().configureEach {
+    standalone.set(false)
+    dependsOn(bootIosTestSimulator)
 }
 
 configurations.matching { it.name == "iosMainImplementation" }.configureEach {

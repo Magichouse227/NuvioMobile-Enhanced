@@ -31,6 +31,10 @@ on:
         description: Optional comma-separated commit hashes to omit from the notes
         required: false
         type: string
+      notes_from:
+        description: Optional commit to start the release notes after (default - the last "chore(store) publish" commit on this branch)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -129,14 +133,46 @@ jobs:
       - name: Generate release notes
         env:
           PREVIOUS_BUMP: ${{ steps.release.outputs.previous_bump }}
-          CURRENT_BUMP: ${{ steps.release.outputs.current_bump }}
           EXCLUDE_COMMITS: ${{ inputs.exclude_commits }}
+          NOTES_FROM: ${{ inputs.notes_from }}
+          UPSTREAM_URL: https://github.com/NuvioMedia/NuvioMobile.git
+          UPSTREAM_BRANCH: cmp-rewrite
         run: |
+          notes_to="${GITHUB_SHA}"
+          notes_from="$(printf '%s' "${NOTES_FROM}" | tr -d '[:space:]')"
+          if [[ -n "${notes_from}" ]]; then
+            if ! git cat-file -e "${notes_from}^{commit}" 2>/dev/null; then
+              echo "notes_from commit not found: ${notes_from}" >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "${notes_from}" "${notes_to}"; then
+              echo "notes_from ${notes_from} is not an ancestor of ${GITHUB_REF_NAME}." >&2
+              exit 1
+            fi
+            echo "Release notes start after the given commit ${notes_from}."
+          else
+            notes_from="$(git log "${notes_to}" -n 1 --format=%H --grep='^chore(store): publish ')"
+            if [[ -n "${notes_from}" ]]; then
+              echo "Release notes start after the last store publish commit ${notes_from}."
+            else
+              notes_from="${PREVIOUS_BUMP}"
+              echo "No store publish commit on this branch; starting after the previous version bump ${notes_from}."
+            fi
+          fi
+
+          exclude_ref_args=()
+          if git fetch --no-tags --quiet "${UPSTREAM_URL}" "${UPSTREAM_BRANCH}:refs/remotes/upstream/${UPSTREAM_BRANCH}"; then
+            exclude_ref_args=(--exclude-ref "refs/remotes/upstream/${UPSTREAM_BRANCH}")
+          else
+            echo "::warning::Could not fetch upstream; release notes may include upstream commits."
+          fi
+
           ./scripts/generate-release-notes.sh \
-            --from "${PREVIOUS_BUMP}" \
-            --to "${CURRENT_BUMP}" \
+            --from "${notes_from}" \
+            --to "${notes_to}" \
             --repository "${GITHUB_REPOSITORY}" \
             --exclude "${EXCLUDE_COMMITS}" \
+            "${exclude_ref_args[@]}" \
             > release-notes.md
 
           if [[ ! -s release-notes.md ]]; then
@@ -209,6 +245,11 @@ jobs:
             fi
           done
 
+      - name: Set up Rust
+        run: |
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          cargo install cargo-ndk --locked
+
       - name: Build full release APKs
         run: ./gradlew :androidApp:assembleFullRelease -Pnuvio.app.versionName="${RELEASE_VERSION}" --stacktrace
 
@@ -223,14 +264,14 @@ jobs:
     name: Build iOS IPA
     if: inputs.mode != 'dry-run' && (inputs.target == 'all' || inputs.target == 'ios-only')
     needs: prepare
-    runs-on: macos-26
-    timeout-minutes: 120
+    runs-on: xcode-27
+    timeout-minutes: 180
     env:
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
       GRADLE_OPTS: -Dfile.encoding=UTF-8
-      KOTLIN_DAEMON_JVMARGS: -Xmx2048M
-      NUVIO_GRADLE_JVMARGS: -Xmx4608M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768M
-      NUVIO_KOTLIN_NATIVE_JVMARGS: -Xmx4608M
+      KOTLIN_DAEMON_JVMARGS: -Xmx1024M
+      NUVIO_GRADLE_JVMARGS: -Xmx2048M -Dfile.encoding=UTF-8 -XX:MaxMetaspaceSize=768M -XX:+UseG1GC
+      NUVIO_KOTLIN_NATIVE_JVMARGS: -Xmx9216M -XX:+UseG1GC
       RELEASE_PROPERTIES_BASE64: ${{ secrets.NUVIO_LOCAL_PROPERTIES_BASE64 }}
       CONTRIBUTIONS_URL: ${{ secrets.CONTRIBUTIONS_URL }}
 
@@ -268,6 +309,20 @@ jobs:
             printf 'CONTRIBUTIONS_URL=%s\n' "${CONTRIBUTIONS_URL}" >> local.properties
           fi
 
+      - name: Constrain Gradle memory for the hosted runner
+        run: |
+          gradle_user_home="${GRADLE_USER_HOME:-${HOME}/.gradle}"
+          mkdir -p "${gradle_user_home}"
+          {
+            echo "org.gradle.jvmargs=${NUVIO_GRADLE_JVMARGS}"
+            echo "kotlin.daemon.jvmargs=${KOTLIN_DAEMON_JVMARGS}"
+            echo "kotlin.native.jvmArgs=${NUVIO_KOTLIN_NATIVE_JVMARGS}"
+            echo "org.gradle.parallel=false"
+            echo "org.gradle.workers.max=1"
+            echo "kotlin.native.disableCompilerDaemon=true"
+          } >> "${gradle_user_home}/gradle.properties"
+          cat "${gradle_user_home}/gradle.properties"
+
       - name: Prepare iOS dependencies
         run: ./scripts/prepare-ios-dependencies.sh
 
@@ -290,16 +345,16 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: nuvio-${{ needs.prepare.outputs.version }}-ios-full-release
-          path: build/ios-ipa/*-full-release.ipa
+          path: build/ios-ipa/*.ipa
           if-no-files-found: error
 
+  # Creates the release with the APKs as soon as Android succeeds — does not wait for iOS.
   release:
     name: Create ${{ inputs.mode }} release
-    if: inputs.mode == 'draft' || inputs.mode == 'publish'
+    if: (inputs.mode == 'draft' || inputs.mode == 'publish') && (inputs.target == 'all' || inputs.target == 'android-only')
     needs:
       - prepare
       - android
-      - ios
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -311,17 +366,24 @@ jobs:
       RELEASE_BRANCH: ${{ github.ref_name }}
 
     steps:
-      - name: Download release artifacts
+      - name: Download release notes
         uses: actions/download-artifact@v8
         with:
+          name: release-notes
+          path: release-assets
+
+      - name: Download Android artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: nuvio-*-android-full-release
           path: release-assets
           merge-multiple: true
 
       - name: Create GitHub release
         run: |
-          mapfile -t release_files < <(find release-assets -maxdepth 1 -type f \( -name '*.apk' -o -name '*.ipa' \) -print | sort)
+          mapfile -t release_files < <(find release-assets -maxdepth 1 -type f -name '*.apk' -print | sort)
           if (( ${#release_files[@]} == 0 )); then
-            echo "No release packages were produced." >&2
+            echo "No Android packages were produced." >&2
             exit 1
           fi
 
@@ -337,12 +399,75 @@ jobs:
           fi
           gh release create "${release_args[@]}" "${release_files[@]}"
 
-  store:
-    name: Update sideload source
-    if: inputs.mode == 'publish' && (inputs.target == 'all' || inputs.target == 'ios-only')
+  # Attaches the IPA to the release created above once iOS finishes.
+  # For ios-only runs there is no Android release, so this job creates the release itself.
+  release-ios:
+    name: Attach iOS IPA to ${{ inputs.mode }} release
+    if: >-
+      always()
+      && (inputs.mode == 'draft' || inputs.mode == 'publish')
+      && needs.prepare.result == 'success'
+      && needs.ios.result == 'success'
+      && (needs.release.result == 'success' || inputs.target == 'ios-only')
     needs:
       - prepare
+      - ios
       - release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_MODE: ${{ inputs.mode }}
+      RELEASE_TARGET: ${{ inputs.target }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.tag }}
+      RELEASE_BRANCH: ${{ github.ref_name }}
+
+    steps:
+      - name: Download release notes
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: release-assets
+
+      - name: Download iOS artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: nuvio-*-ios-full-release
+          path: release-assets
+          merge-multiple: true
+
+      - name: Attach IPA to GitHub release
+        run: |
+          mapfile -t ipa_files < <(find release-assets -maxdepth 1 -type f -name '*.ipa' -print | sort)
+          if (( ${#ipa_files[@]} == 0 )); then
+            echo "No iOS packages were produced." >&2
+            exit 1
+          fi
+
+          if [[ "${RELEASE_TARGET}" == "ios-only" ]]; then
+            release_args=(
+              "${RELEASE_TAG}"
+              --repo "${GITHUB_REPOSITORY}"
+              --target "${RELEASE_BRANCH}"
+              --title "${RELEASE_VERSION}"
+              --notes-file release-assets/release-notes.md
+            )
+            if [[ "${RELEASE_MODE}" == "draft" ]]; then
+              release_args+=(--draft)
+            fi
+            gh release create "${release_args[@]}" "${ipa_files[@]}"
+          else
+            gh release upload "${RELEASE_TAG}" --repo "${GITHUB_REPOSITORY}" --clobber "${ipa_files[@]}"
+          fi
+
+  store:
+    name: Update sideload source
+    if: always() && inputs.mode == 'publish' && needs.prepare.result == 'success' && needs.release-ios.result == 'success'
+    needs:
+      - prepare
+      - release-ios
     permissions:
       contents: write
     uses: ./.github/workflows/update-store-source.yml

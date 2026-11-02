@@ -10,6 +10,7 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -31,6 +32,7 @@ import com.nuvio.app.core.logging.InAppLogger
 import com.nuvio.app.core.network.NetworkCondition
 import com.nuvio.app.core.network.NetworkStatusRepository
 import com.nuvio.app.core.sync.SyncManager
+import com.nuvio.app.core.ui.LocalVerticalBarPadding
 import com.nuvio.app.core.ui.NativeProfileSwitcherController
 import com.nuvio.app.core.ui.NativeTabBridge
 import com.nuvio.app.core.ui.NuvioTokens
@@ -39,12 +41,15 @@ import com.nuvio.app.core.ui.nuvio
 import com.nuvio.app.features.auth.AuthScreen
 import com.nuvio.app.features.membership.MemberAccessRepository
 import com.nuvio.app.features.profiles.AvatarRepository
+import com.nuvio.app.features.profiles.ProfileBiometricAuth
+import com.nuvio.app.features.profiles.ProfileBiometricResult
 import com.nuvio.app.features.profiles.NuvioProfile
 import com.nuvio.app.features.profiles.ProfileEditScreen
 import com.nuvio.app.features.profiles.ProfileRepository
 import com.nuvio.app.features.profiles.ProfileSelectionScreen
 import com.nuvio.app.features.profiles.profileAvatarImageUrl
 import com.nuvio.app.navigation.AppRoute
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 private enum class AppGateScreen {
@@ -190,6 +195,9 @@ internal fun AppGate(
     // Set once both of the above are true, to play AppLoadingContent's exit-toward-the-Profile-tab
     // animation; only once *that* finishes does it actually close the overlay.
     var profileTransitionExiting by remember { mutableStateOf(false) }
+    // Prevent profile sync/state updates from launching a second startup biometric prompt while the
+    // first system prompt is still visible. The guard is transient and clears as soon as the attempt ends.
+    var startupBiometricInProgress by remember { mutableStateOf(false) }
 
     // Resetting these three flags has to happen synchronously, in the very same recomposition
     // that flips `profileSelectionTransitionActive` on — not from a LaunchedEffect keyed on it,
@@ -240,9 +248,14 @@ internal fun AppGate(
         profileSelectionTransitionActive = false
     }
 
+    fun reportAppReady(ready: Boolean) {
+        appGateController?.reportAppReady(ready)
+        onAppReady?.invoke(ready)
+    }
+
     LaunchedEffect(gateScreen, onAppReady) {
         if (gateScreen != AppGateScreen.Main.name) {
-            onAppReady?.invoke(false)
+            reportAppReady(false)
         }
     }
 
@@ -350,7 +363,7 @@ internal fun AppGate(
         }
     }
 
-    fun enterProfileGate(profiles: List<NuvioProfile>, syncOnEnter: Boolean) {
+    suspend fun enterProfileGate(profiles: List<NuvioProfile>, syncOnEnter: Boolean) {
         profileSelectionLoading = false
         profileSelectionTransitionActive = false
         if (profiles.isEmpty()) {
@@ -364,6 +377,50 @@ internal fun AppGate(
             gateScreen = AppGateScreen.Main.name
             autoSkipProfileSelection = false
             return
+        }
+
+        if (
+            !startupBiometricInProgress &&
+            ProfileRepository.state.value.rememberLastProfileEnabled &&
+            ProfileRepository.state.value.hasEverSelectedProfile
+        ) {
+            val rememberedLockedProfile = profiles.find {
+                it.profileIndex == ProfileRepository.activeProfileId
+            }
+            if (
+                rememberedLockedProfile?.pinEnabled == true &&
+                rememberedLockedProfile.profileIndex == 1
+            ) {
+                startupBiometricInProgress = true
+                try {
+                    val biometricResult = try {
+                        ProfileBiometricAuth.authenticate(1, rememberedLockedProfile.userId)
+                    } catch (e: CancellationException) {
+                        throw e
+                    } catch (_: Exception) {
+                        // A platform/storage exception is an authentication failure, never a bypass.
+                        // Continue to the normal profile/PIN gate rather than leaving startup stuck.
+                        ProfileBiometricResult.Failed
+                    }
+                    when (biometricResult) {
+                        ProfileBiometricResult.Success -> {
+                            selectProfile(rememberedLockedProfile, sync = syncOnEnter)
+                            gateScreen = AppGateScreen.Main.name
+                            autoSkipProfileSelection = false
+                            return
+                        }
+                        ProfileBiometricResult.Invalidated -> Unit
+                        ProfileBiometricResult.FallbackRequested,
+                        ProfileBiometricResult.Cancelled,
+                        ProfileBiometricResult.Unavailable,
+                        ProfileBiometricResult.NotConfigured,
+                        ProfileBiometricResult.Failed,
+                        -> Unit
+                    }
+                } finally {
+                    startupBiometricInProgress = false
+                }
+            }
         }
 
         autoSkipProfileSelection = true
@@ -491,11 +548,12 @@ internal fun AppGate(
                 !profileOverlayState.currentState &&
                 launchOverlayState.isIdle &&
                 !launchOverlayState.currentState
-        val ready = gateScreen == AppGateScreen.Main.name &&
-            externalMainContentReady &&
-            !profileSelectionLoading &&
-            overlaysHidden
-        onAppReady?.invoke(ready)
+        reportAppReady(
+            gateScreen == AppGateScreen.Main.name &&
+                externalMainContentReady &&
+                !profileSelectionLoading &&
+                overlaysHidden,
+        )
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
@@ -512,7 +570,12 @@ internal fun AppGate(
                     AppIntroContent(modifier = Modifier.fillMaxSize())
                 }
                 AppGateScreen.Auth.name -> {
-                    AuthScreen(modifier = Modifier.fillMaxSize())
+                    AuthScreen(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(MaterialTheme.nuvio.colors.background)
+                            .padding(LocalVerticalBarPadding.current),
+                    )
                 }
                 AppGateScreen.ProfileSelection.name -> {
                     Box(
