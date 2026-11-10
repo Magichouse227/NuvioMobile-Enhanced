@@ -1,7 +1,12 @@
 package com.nuvio.app.features.details.components
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,8 +27,8 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.VolumeOff
-import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material.icons.automirrored.rounded.VolumeOff
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -36,7 +41,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.BiasAlignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -54,9 +58,12 @@ import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import com.nuvio.app.core.format.extractReleaseYearForDisplay
+import com.nuvio.app.core.ui.ArtworkBackdrop
 import com.nuvio.app.core.ui.NuvioTokens
+import com.nuvio.app.core.ui.featherArtwork
 import com.nuvio.app.features.details.MetaDetails
 import com.nuvio.app.features.details.formatRuntimeForDisplay
+import com.nuvio.app.features.player.MiniPlayerController
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.detail_logo_content_description
 import nuvio.composeapp.generated.resources.details_season_count
@@ -64,11 +71,13 @@ import nuvio.composeapp.generated.resources.details_director
 import nuvio.composeapp.generated.resources.details_writer
 import org.jetbrains.compose.resources.pluralStringResource
 import org.jetbrains.compose.resources.stringResource
+import com.nuvio.app.core.ui.LocalVerticalBarPadding
 
 @Composable
 fun TabletDetailBackdrop(
     meta: MetaDetails,
     cinematic: Boolean,
+    backdropImage: ImageBitmap?,
     scrollOffsetPx: () -> Float,
     heroHeightPx: () -> Int,
     heroTrailerSourceUrl: String?,
@@ -88,10 +97,21 @@ fun TabletDetailBackdrop(
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        if (cinematic) {
+            ArtworkBackdrop(
+                image = backdropImage,
+                alignment = TabletArtworkBackdropAlignment,
+            )
+        }
         BackdropArtwork(
             meta = meta,
             gradientColor = backgroundColor,
-            blur = false,
+            cinematic = cinematic,
+            modifier = if (cinematic) {
+                Modifier.graphicsLayer { alpha = 1f - scrollProgress() }
+            } else {
+                Modifier
+            },
             heroTrailerSourceUrl = heroTrailerSourceUrl,
             heroTrailerSourceAudioUrl = heroTrailerSourceAudioUrl,
             heroTrailerReady = heroTrailerReady,
@@ -101,22 +121,14 @@ fun TabletDetailBackdrop(
             onHeroTrailerReady = onHeroTrailerReady,
             onHeroTrailerFinished = onHeroTrailerFinished,
         )
-        if (cinematic) {
-            BackdropArtwork(
-                meta = meta,
-                gradientColor = backgroundColor,
-                blur = true,
-                modifier = Modifier.graphicsLayer { alpha = scrollProgress() },
+        if (!cinematic) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer { alpha = scrollProgress() * 0.86f }
+                    .background(backgroundColor),
             )
         }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .graphicsLayer {
-                    alpha = scrollProgress() * if (cinematic) 0.36f else 0.86f
-                }
-                .background(backgroundColor),
-        )
     }
 }
 
@@ -124,7 +136,7 @@ fun TabletDetailBackdrop(
 private fun BackdropArtwork(
     meta: MetaDetails,
     gradientColor: Color,
-    blur: Boolean,
+    cinematic: Boolean = false,
     modifier: Modifier = Modifier,
     heroTrailerSourceUrl: String? = null,
     heroTrailerSourceAudioUrl: String? = null,
@@ -150,12 +162,19 @@ private fun BackdropArtwork(
     )
     val artworkModifier = Modifier
         .fillMaxSize()
-        .then(if (blur) Modifier.blur(30.dp) else Modifier)
 
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(gradientColor),
+            .then(
+                if (cinematic) {
+                    Modifier.featherArtwork {
+                        cinematicStartFade(size.width, gradientIntensity, isRtl)
+                    }
+                } else {
+                    Modifier.background(gradientColor)
+                },
+            ),
     ) {
         val imageUrl = meta.background ?: meta.poster
         if (imageUrl != null) {
@@ -189,7 +208,7 @@ private fun BackdropArtwork(
             HeroTrailerPlayerSurface(
                 sourceUrl = heroTrailerSourceUrl,
                 sourceAudioUrl = heroTrailerSourceAudioUrl,
-                playWhenReady = heroTrailerPlayWhenReady(),
+                playWhenReady = heroTrailerPlayWhenReady() && !MiniPlayerController.isActive,
                 muted = heroTrailerMuted,
                 modifier = artworkModifier.graphicsLayer {
                     alpha = trailerAlpha
@@ -200,7 +219,7 @@ private fun BackdropArtwork(
             )
         }
 
-        Box(
+        if (!cinematic) Box(
             modifier = Modifier
                 .fillMaxSize()
                 .drawWithCache {
@@ -232,6 +251,23 @@ private fun BackdropArtwork(
                 },
         )
     }
+}
+
+private fun cinematicStartFade(width: Float, intensity: Float, isRtl: Boolean): Brush {
+    val opacity = NuvioTokens.Opacity
+    fun visible(overlay: Float) = Color.Black.copy(alpha = 1f - overlay * intensity)
+    return Brush.horizontalGradient(
+        colorStops = arrayOf(
+            0.00f to Color.Transparent,
+            0.12f to visible(0.98f),
+            0.34f to visible(opacity.overlayHeavy),
+            0.62f to visible(opacity.overlayLight),
+            0.86f to visible(opacity.subtle),
+            1.00f to Color.Black,
+        ),
+        startX = if (isRtl) width else 0f,
+        endX = if (isRtl) 0f else width,
+    )
 }
 
 @Composable
@@ -270,6 +306,7 @@ fun TabletDetailHero(
         Column(
             modifier = Modifier
                 .align(Alignment.BottomStart)
+                .padding(LocalVerticalBarPadding.current)
                 .fillMaxWidth()
                 .padding(
                     start = horizontalPadding,
@@ -306,12 +343,18 @@ fun TabletDetailHero(
             if (showOverview) {
                 Spacer(modifier = Modifier.height(space.s20))
                 TabletHeroMetaRow(meta = meta, showImdbRating = showOverallRatings && !isMdbListActive)
-                if (isMdbListActive && meta.externalRatings.isNotEmpty()) {
-                    Spacer(modifier = Modifier.height(space.s12))
-                    DetailRatingsRow(
-                        ratings = meta.externalRatings,
-                        modifier = Modifier.widthIn(max = 520.dp),
-                    )
+                AnimatedVisibility(
+                    visible = isMdbListActive && meta.externalRatings.isNotEmpty(),
+                    enter = fadeIn() + expandVertically(),
+                    exit = fadeOut() + shrinkVertically(),
+                ) {
+                    Column {
+                        Spacer(modifier = Modifier.height(space.s12))
+                        DetailRatingsRow(
+                            ratings = meta.externalRatings,
+                            modifier = Modifier.widthIn(max = 520.dp),
+                        )
+                    }
                 }
             }
             if (meta.genres.isNotEmpty()) {
@@ -363,6 +406,7 @@ fun TabletDetailHero(
                 enabled = heroTrailerReady,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
+                    .padding(LocalVerticalBarPadding.current)
                     .padding(
                         top = WindowInsets.statusBars.asPaddingValues().calculateTopPadding() + space.s8,
                         end = horizontalPadding,
@@ -375,7 +419,7 @@ fun TabletDetailHero(
             ) {
                 Box(contentAlignment = Alignment.Center) {
                     Icon(
-                        imageVector = if (heroTrailerMuted) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+                        imageVector = if (heroTrailerMuted) Icons.AutoMirrored.Rounded.VolumeOff else Icons.AutoMirrored.Rounded.VolumeUp,
                         contentDescription = null,
                         modifier = Modifier.size(20.dp),
                     )
@@ -398,7 +442,9 @@ private fun TabletHeroMetaRow(meta: MetaDetails, showImdbRating: Boolean) {
     }
     val validImdbRating = meta.imdbRating
         ?.takeIf { showImdbRating }
-        ?.takeIf { raw -> raw.toDoubleOrNull()?.let { it > 0.0 } == true }
+        ?.toDoubleOrNull()
+        ?.takeIf { it > 0.0 }
+        ?.let(::formatOneDecimal)
     val itemStyle = MaterialTheme.typography.titleSmall.copy(
         fontSize = NuvioTokens.Type.bodyLg,
         fontWeight = FontWeight.Bold,
@@ -422,10 +468,7 @@ private fun TabletHeroMetaRow(meta: MetaDetails, showImdbRating: Boolean) {
         }
         if (validImdbRating != null) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                ImdbRatingSourceLabel(
-                    storeTextStyle = itemStyle,
-                    storeTextColor = ImdbYellow,
-                )
+                ImdbRatingSourceLabel(storeTextStyle = itemStyle)
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
                     text = validImdbRating,
@@ -440,3 +483,5 @@ private fun TabletHeroMetaRow(meta: MetaDetails, showImdbRating: Boolean) {
 private val TabletHeroHeight = 660.dp
 private val TabletHeroTopInset = 96.dp
 private const val BackdropVerticalBias = -0.6f
+
+internal val TabletArtworkBackdropAlignment: Alignment = BiasAlignment(0f, BackdropVerticalBias)

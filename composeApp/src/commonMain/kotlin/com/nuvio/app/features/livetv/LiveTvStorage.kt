@@ -9,6 +9,10 @@ internal expect object LiveTvStorage {
     fun saveFavoriteChannelIdsBlob(blob: String)
     fun loadLastWatchedChannelId(): String?
     fun saveLastWatchedChannelId(channelId: String)
+    fun loadRecentChannelIdsBlob(): String?
+    fun saveRecentChannelIdsBlob(blob: String)
+    fun loadChannelViewMode(): String?
+    fun saveChannelViewMode(mode: String)
     fun loadNavigationEnabled(): Boolean?
     fun saveNavigationEnabled(enabled: Boolean)
     fun loadStalkerSettings(): LiveTvStalkerSettings
@@ -16,4 +20,8 @@ internal expect object LiveTvStorage {
     fun loadXtreamSettings(): LiveTvXtreamSettings
     fun saveXtreamSettings(settings: LiveTvXtreamSettings)
     fun publishNavigationVisibility(visible: Boolean)
+    fun loadEpgSourcesBlob(): String?
+    fun saveEpgSourcesBlob(blob: String)
+    fun loadEpgAutoDetectEnabled(): Boolean?
+    fun saveEpgAutoDetectEnabled(enabled: Boolean)
 }

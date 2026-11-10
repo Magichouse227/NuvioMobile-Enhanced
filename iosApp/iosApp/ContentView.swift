@@ -1,3 +1,4 @@
+import AVKit
 import Combine
 import SwiftUI
 import UIKit
@@ -22,18 +23,24 @@ private enum NuvioComposeHost {
 
     static func wrap(
         _ contentController: UIViewController,
+        backgroundColor: UIColor = nuvioBackgroundColor,
         disablesInteractiveContentPopGesture: Bool = false,
         passesThroughEmptyNavigationBarAreas: Bool = false,
         hidesContainingTabBar: Bool = false,
+        verticalBar: VerticalBar? = nil,
+        hinge: Hinge? = nil,
         onTabBarControllerAvailable: ((UITabBarController) -> Void)? = nil
     ) -> RootComposeViewController {
         _ = registerPlayerBridge
-        contentController.view.backgroundColor = nuvioBackgroundColor
+        contentController.view.backgroundColor = backgroundColor
         return RootComposeViewController(
             contentController: contentController,
+            backgroundColor: backgroundColor,
             disablesInteractiveContentPopGesture: disablesInteractiveContentPopGesture,
             passesThroughEmptyNavigationBarAreas: passesThroughEmptyNavigationBarAreas,
             hidesContainingTabBar: hidesContainingTabBar,
+            verticalBar: verticalBar,
+            hinge: hinge,
             onTabBarControllerAvailable: onTabBarControllerAvailable
         )
     }
@@ -41,23 +48,36 @@ private enum NuvioComposeHost {
 
 final class RootComposeViewController: UIViewController {
     private let contentController: UIViewController
+    private let backgroundColor: UIColor
     private let disablesInteractiveContentPopGesture: Bool
     private let passesThroughEmptyNavigationBarAreas: Bool
     private let hidesContainingTabBar: Bool
+    private let hinge: Hinge?
     private let onTabBarControllerAvailable: ((UITabBarController) -> Void)?
     private var immersiveSystemUIObserver: NSObjectProtocol?
+    private let verticalBar: VerticalBar?
+    private var leadingConstraint: NSLayoutConstraint?
+    private var trailingConstraint: NSLayoutConstraint?
+    private var isHalfOpen = false
+    private var foldBoundsSize = CGSize.zero
 
     init(
         contentController: UIViewController,
+        backgroundColor: UIColor,
         disablesInteractiveContentPopGesture: Bool,
         passesThroughEmptyNavigationBarAreas: Bool = false,
         hidesContainingTabBar: Bool,
+        verticalBar: VerticalBar?,
+        hinge: Hinge?,
         onTabBarControllerAvailable: ((UITabBarController) -> Void)?
     ) {
         self.contentController = contentController
+        self.backgroundColor = backgroundColor
         self.disablesInteractiveContentPopGesture = disablesInteractiveContentPopGesture
         self.passesThroughEmptyNavigationBarAreas = passesThroughEmptyNavigationBarAreas
         self.hidesContainingTabBar = hidesContainingTabBar
+        self.verticalBar = verticalBar
+        self.hinge = hinge
         self.onTabBarControllerAvailable = onTabBarControllerAvailable
         super.init(nibName: nil, bundle: nil)
     }
@@ -70,18 +90,35 @@ final class RootComposeViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
 
-        view.backgroundColor = nuvioBackgroundColor
-        contentController.view.backgroundColor = nuvioBackgroundColor
+        view.backgroundColor = backgroundColor
+        view.isOpaque = backgroundColor != .clear
+        contentController.view.backgroundColor = backgroundColor
 
         addChild(contentController)
         view.addSubview(contentController.view)
         contentController.view.translatesAutoresizingMaskIntoConstraints = false
+        let leadingConstraint = contentController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor)
+        let trailingConstraint = contentController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor)
         NSLayoutConstraint.activate([
-            contentController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            contentController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             contentController.view.topAnchor.constraint(equalTo: view.topAnchor),
             contentController.view.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            leadingConstraint,
+            trailingConstraint,
         ])
+        self.leadingConstraint = leadingConstraint
+        self.trailingConstraint = trailingConstraint
+        if #available(iOS 27.1, *) {
+            registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) {
+                (controller: RootComposeViewController, _: UITraitCollection) in
+                controller.updateVerticalBar()
+            }
+            if hinge != nil {
+                view.addInteraction(UIHingeInteraction { [weak self] _, update in
+                    self?.isHalfOpen = update.hinge?.status == .partiallyOpen
+                    self?.updateFold()
+                })
+            }
+        }
         contentController.didMove(toParent: self)
 
         immersiveSystemUIObserver = NotificationCenter.default.addObserver(
@@ -96,6 +133,54 @@ final class RootComposeViewController: UIViewController {
     deinit {
         if let immersiveSystemUIObserver {
             NotificationCenter.default.removeObserver(immersiveSystemUIObserver)
+        }
+    }
+
+    override func viewSafeAreaInsetsDidChange() {
+        super.viewSafeAreaInsetsDidChange()
+        updateVerticalBar()
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        enforceContainingTabBarVisibility()
+        guard view.bounds.size != foldBoundsSize else { return }
+        foldBoundsSize = view.bounds.size
+        updateFold()
+    }
+
+    private func updateFold() {
+        guard let hinge else { return }
+        guard #available(iOS 27.1, *), isHalfOpen,
+              let fold = view.reservedRegions(kind: .division).first(where: { $0.frame.width > $0.frame.height })
+        else {
+            hinge.clear()
+            return
+        }
+        hinge.update(top: Double(fold.frame.minY), bottom: Double(fold.frame.maxY))
+    }
+
+    private func updateVerticalBar() {
+        let insets = verticalBarInsets
+        if let verticalBar {
+            verticalBar.update(start: Double(insets.leading), end: Double(insets.trailing))
+        } else {
+            leadingConstraint?.constant = insets.leading
+            trailingConstraint?.constant = -insets.trailing
+        }
+    }
+
+    private var verticalBarInsets: NSDirectionalEdgeInsets {
+        guard #available(iOS 27.1, *) else { return .zero }
+        let insets = view.safeAreaInsets
+        let isRightToLeft = view.effectiveUserInterfaceLayoutDirection == .rightToLeft
+        switch traitCollection.verticalBarEdge {
+        case .leading:
+            return NSDirectionalEdgeInsets(top: 0, leading: isRightToLeft ? insets.right : insets.left, bottom: 0, trailing: 0)
+        case .trailing:
+            return NSDirectionalEdgeInsets(top: 0, leading: 0, bottom: 0, trailing: isRightToLeft ? insets.left : insets.right)
+        default:
+            return .zero
         }
     }
 
@@ -155,15 +240,22 @@ final class RootComposeViewController: UIViewController {
         }
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        enforceContainingTabBarVisibility()
-    }
-
     override func viewWillDisappear(_ animated: Bool) {
         setNavigationBarPassthroughEnabled(false)
         setInteractiveContentPopGestureEnabled(true)
         super.viewWillDisappear(animated)
+    }
+
+    func prepareForPictureInPictureParking() {
+        setNavigationBarPassthroughEnabled(false)
+        setInteractiveContentPopGestureEnabled(true)
+    }
+
+    func restoreAfterPictureInPictureParking() {
+        refreshContainingTabBarVisibility()
+        refreshImmersiveSystemUI()
+        setInteractiveContentPopGestureEnabled(false)
+        setNavigationBarPassthroughEnabled(true)
     }
 
     func refreshContainingTabBarVisibility() {
@@ -299,8 +391,6 @@ final class TabNavigationCoordinator: ObservableObject {
         setPath([])
     }
 
-    /// Used by NavigationStack's path binding so interactive swipe-back and
-    /// programmatic mutations share the same Kotlin route-disposal behavior.
     func setPath(_ newPath: [RouteWrapper]) {
         let retainedIDs = Set(newPath.map(\.id))
         let removedRoutes = path
@@ -309,7 +399,9 @@ final class TabNavigationCoordinator: ObservableObject {
 
         let returnedToRoot = !path.isEmpty && newPath.isEmpty
         path = newPath
-        removedRoutes.forEach { AppKt.disposeRoute(route: $0) }
+        removedRoutes
+            .filter { !PlayerPictureInPictureParking.shared.isParked($0) }
+            .forEach { AppKt.disposeRoute(route: $0) }
         if returnedToRoot {
             onReturnedToRoot?()
         }
@@ -871,6 +963,7 @@ final class AppNavigationCoordinator: ObservableObject {
     let profileTabInteraction = NativeProfileTabInteractionCoordinator()
 
     init() {
+        PlayerPictureInPictureParking.shared.appCoordinator = self
         setTabBarVisible(true)
         reloadTabBarBehavior()
         reloadLiveTvTabVisibility()
@@ -906,6 +999,11 @@ final class AppNavigationCoordinator: ObservableObject {
 
     var availableTabs: [NuvioAppTab] {
         NuvioAppTab.allCases.filter { $0 != .liveTv || isLiveTvTabVisible }
+    }
+
+    var usesGlassTabBarOverlay: Bool {
+        tabBarBehavior.usesCompactPill ||
+            (tabBarBehavior.isEnabled && UIDevice.current.userInterfaceIdiom == .pad)
     }
 
     func reloadTabBarBehavior() {
@@ -957,41 +1055,10 @@ final class AppNavigationCoordinator: ObservableObject {
             return
         }
 
-        if visible {
-            guard !isTabBarVisible || !isCompactPillHidden else { return }
-            withAnimation(.smooth(duration: 0.38)) {
-                isTabBarVisible = visible
-            }
-            let needsGrowDelay = !isNativeTabBarVisible
-
-            tabBarTransitionTask = Task { [weak self] in
-                if needsGrowDelay {
-                    try? await Task.sleep(nanoseconds: 340_000_000)
-                }
-                guard !Task.isCancelled, let self, self.isTabBarVisible else { return }
-                var transaction = Transaction()
-                transaction.disablesAnimations = true
-                withTransaction(transaction) {
-                    self.isNativeTabBarVisible = true
-                    self.isCompactPillHidden = true
-                }
-                try? await Task.sleep(nanoseconds: 50_000_000)
-                guard !Task.isCancelled, self.isTabBarVisible else { return }
-                self.refreshNativeTabBarMetrics()
-            }
-            return
-        }
-
-        guard isTabBarVisible || isNativeTabBarVisible || isCompactPillHidden else { return }
-        var transaction = Transaction()
-        transaction.disablesAnimations = true
-        withTransaction(transaction) {
-            isCompactPillHidden = false
-            isNativeTabBarVisible = false
-        }
-        withAnimation(.smooth(duration: 0.38)) {
-            isTabBarVisible = false
-        }
+        isNativeTabBarVisible = false
+        isCompactPillHidden = false
+        guard isTabBarVisible != visible else { return }
+        isTabBarVisible = visible
     }
 
     func reloadLiveTvTabVisibility() {
@@ -1087,6 +1154,9 @@ final class AppNavigationCoordinator: ObservableObject {
             AppKt.disposeRoute(route: route)
             return
         }
+        if route is PlayerRoute, !PlayerPictureInPictureParking.shared.isParked(route) {
+            PlayerPictureInPictureParking.shared.closeParked()
+        }
         let requestedTab = NuvioAppTab.from(kotlinName: route.preferredTabName)
             ?? tab(for: origin)
             ?? selectedTab
@@ -1094,6 +1164,13 @@ final class AppNavigationCoordinator: ObservableObject {
         let target = coordinator(for: targetTab)
         selectedTab = targetTab
         target.push(route, launchSingleTop: launchSingleTop)
+    }
+
+    func showParkedPlayerRoute(_ route: AppRoute, in target: TabNavigationCoordinator) {
+        if let targetTab = tab(for: target) {
+            selectedTab = targetTab
+        }
+        target.path.append(RouteWrapper(route: route))
     }
 
     func replace(_ route: AppRoute, in target: TabNavigationCoordinator) {
@@ -1117,6 +1194,7 @@ struct NativeNavComposeView: UIViewControllerRepresentable {
     let appCoordinator: AppNavigationCoordinator
 
     func makeUIViewController(context: Context) -> UIViewController {
+        let verticalBar = VerticalBar()
         let controller = MainViewControllerKt.MainViewController(
             initialTabName: tab.rawValue,
             useNativeTabBar: usesNativeTabBar,
@@ -1147,11 +1225,13 @@ struct NativeNavComposeView: UIViewControllerRepresentable {
                     addProfile: addProfile
                 )
             },
-            appGateController: appCoordinator.appGateController
+            appGateController: appCoordinator.appGateController,
+            verticalBar: verticalBar
         )
         return NuvioComposeHost.wrap(
             controller,
             hidesContainingTabBar: !usesNativeTabBar,
+            verticalBar: verticalBar,
             onTabBarControllerAvailable: { tabBarController in
                 if usesNativeTabBar {
                     appCoordinator.profileTabInteraction.attach(to: tabBarController)
@@ -1170,6 +1250,7 @@ struct AppGateComposeView: UIViewControllerRepresentable {
     let appCoordinator: AppNavigationCoordinator
 
     func makeUIViewController(context: Context) -> UIViewController {
+        let verticalBar = VerticalBar()
         let controller = MainViewControllerKt.AppGateViewController(
             appGateController: appCoordinator.appGateController,
             nativeProfileSwitcherController: appCoordinator.profileSwitcherController,
@@ -1184,11 +1265,11 @@ struct AppGateComposeView: UIViewControllerRepresentable {
             },
             onMainContentVisibleChanged: { visible in
                 appCoordinator.setMainContentVisible(visible.boolValue)
-            }
+            },
+            verticalBar: verticalBar
         )
-        controller.view.backgroundColor = .clear
         controller.view.isOpaque = false
-        return controller
+        return NuvioComposeHost.wrap(controller, backgroundColor: .clear, verticalBar: verticalBar)
     }
 
     func updateUIViewController(_ uiViewController: UIViewController, context: Context) {}
@@ -1203,6 +1284,23 @@ struct DetailComposeView: UIViewControllerRepresentable {
     let appCoordinator: AppNavigationCoordinator
 
     func makeUIViewController(context: Context) -> UIViewController {
+        if route is PlayerRoute {
+            return PlayerRouteContainerViewController(
+                route: route,
+                coordinator: coordinator,
+                makeContent: { makeScreenController() }
+            )
+        }
+        return makeScreenController()
+    }
+
+    private func makeScreenController() -> UIViewController {
+        let route = route
+        let coordinator = coordinator
+        let appCoordinator = appCoordinator
+        let parking = PlayerPictureInPictureParking.shared
+        let verticalBar = VerticalBar()
+        let hinge = Hinge()
         let controller = MainViewControllerKt.ScreenViewController(
             route: route,
             onNavigate: { newRoute, launchSingleTop in
@@ -1213,9 +1311,17 @@ struct DetailComposeView: UIViewControllerRepresentable {
                 )
             },
             onGoBack: {
-                coordinator.pop()
+                if parking.isParked(route) {
+                    parking.closeParked()
+                } else {
+                    coordinator.pop()
+                }
             },
             onReplace: { newRoute in
+                if parking.isParked(route) {
+                    AppKt.disposeRoute(route: newRoute)
+                    return
+                }
                 appCoordinator.replace(newRoute, in: coordinator)
             },
             onActivate: { tabName in
@@ -1223,12 +1329,16 @@ struct DetailComposeView: UIViewControllerRepresentable {
             },
             appGateController: appCoordinator.appGateController,
             useNativeTabBar: usesNativeTabBar,
-            useTabletFloatingTabBar: usesTabletFloatingTabBar
+            useTabletFloatingTabBar: usesTabletFloatingTabBar,
+            verticalBar: verticalBar,
+            hinge: hinge
         )
         return NuvioComposeHost.wrap(
             controller,
             disablesInteractiveContentPopGesture: true,
-            passesThroughEmptyNavigationBarAreas: true
+            passesThroughEmptyNavigationBarAreas: true,
+            verticalBar: verticalBar,
+            hinge: route is PlayerRoute ? hinge : nil
         )
     }
 
@@ -1279,6 +1389,7 @@ struct TabContentView: View {
             usesNativeTabBar &&
                 appCoordinator.isMainContentVisible &&
                 coordinator.path.keepsTabBar &&
+                !appCoordinator.usesGlassTabBarOverlay &&
                 appCoordinator.isNativeTabBarVisible
                 ? Visibility.visible
                 : Visibility.hidden,
@@ -1328,7 +1439,7 @@ private struct DetailDestinationView: View {
     }
 
     private var respectsNativeNavigationSafeArea: Bool {
-        wrapper.route is FolderDetailRoute
+        false
     }
 
     private var showsReadabilityFade: Bool {
@@ -1366,6 +1477,7 @@ private struct DetailDestinationView: View {
         .toolbar(
             usesNativeTabBar &&
                 wrapper.route.keepsTabBar &&
+                !appCoordinator.usesGlassTabBarOverlay &&
                 appCoordinator.isNativeTabBarVisible
                 ? Visibility.visible
                 : Visibility.hidden,
@@ -1375,6 +1487,7 @@ private struct DetailDestinationView: View {
             wrapper.route.hidesNavigationBar ? Visibility.hidden : Visibility.visible,
             for: .navigationBar
         )
+        .verticalBarDisabled(wrapper.route is PlayerRoute)
     }
 
     @ViewBuilder
@@ -1383,6 +1496,17 @@ private struct DetailDestinationView: View {
             content.navigationSubtitle(wrapper.route.subtitle ?? "")
         } else {
             content
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func verticalBarDisabled(_ disabled: Bool) -> some View {
+        if #available(iOS 27.1, *), disabled {
+            toolbarVerticalBehavior(.disabled)
+        } else {
+            self
         }
     }
 }
@@ -1663,7 +1787,8 @@ struct NativeNavContentView: View {
     @StateObject private var iconStore = NativeTabIconStore()
 
     private var usesNativeTabBar: Bool {
-        guard UIDevice.current.userInterfaceIdiom == .phone else {
+        let idiom = UIDevice.current.userInterfaceIdiom
+        guard idiom == .phone || idiom == .pad else {
             return false
         }
         if #available(iOS 26.0, *) {
@@ -1798,25 +1923,18 @@ struct NativeNavContentView: View {
             appCoordinator.tabBarBehavior == .autoHide ? .onScrollDown : .never
         )
         .overlay(alignment: .bottom) {
-            if appCoordinator.tabBarBehavior.usesCompactPill &&
+            if appCoordinator.usesGlassTabBarOverlay &&
                 appCoordinator.isAppReady &&
                 appCoordinator.isSelectedTabAtRoot {
                 GeometryReader { proxy in
-                    let metrics = appCoordinator.isTabBarVisible
-                        ? appCoordinator.nativeTabBarMetrics(for: proxy.size)
-                        : nil
                     NuvioGlassTabBar(
                         appCoordinator: appCoordinator,
-                        iconStore: iconStore,
-                        expandedMetrics: metrics
+                        iconStore: iconStore
                     )
-                    .padding(.leading, metrics?.leadingInset ?? (appCoordinator.isTabBarVisible ? 20 : 16))
-                    .padding(.trailing, metrics?.trailingInset ?? (appCoordinator.isTabBarVisible ? 20 : 16))
+                    .frame(width: proxy.size.width)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
                 .ignoresSafeArea(.all)
-                .opacity(appCoordinator.isCompactPillHidden ? 0 : 1)
-                .accessibilityHidden(appCoordinator.isCompactPillHidden)
             }
         }
         .ignoresSafeArea(.container, edges: .bottom)
@@ -1864,19 +1982,54 @@ struct NativeNavContentView: View {
 }
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var systemUI = SystemUI.shared
 
     var body: some View {
         Group {
             if #available(iOS 16.0, *) {
                 NativeNavContentView()
+                    .accessibilityHidden(systemUI.pictureInPictureMessage != nil)
+                    .allowsHitTesting(systemUI.pictureInPictureMessage == nil)
             } else {
                 ComposeView()
                     .ignoresSafeArea(.all)
+                    .accessibilityHidden(systemUI.pictureInPictureMessage != nil)
+                    .allowsHitTesting(systemUI.pictureInPictureMessage == nil)
             }
         }
         .persistentSystemOverlays(systemUI.isPlayerImmersive ? .hidden : .automatic)
         .statusBarHidden(systemUI.isPlayerImmersive)
+        .overlay {
+            if let message = systemUI.pictureInPictureMessage {
+                Color.black
+                    .ignoresSafeArea()
+                    .overlay {
+                        VStack(spacing: 16) {
+                            Image(uiImage: AVPictureInPictureController.pictureInPictureButtonStartImage)
+                                .renderingMode(.template)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(width: 96, height: 72)
+                                .accessibilityHidden(true)
+                            Text(message)
+                                .font(.body)
+                                .multilineTextAlignment(.center)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .foregroundStyle(.gray)
+                        .padding(24)
+                        .accessibilityElement(children: .combine)
+                    }
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(name: playerSceneDidActivateNotification, object: nil)
+                }
+            }
+        }
     }
 }
 

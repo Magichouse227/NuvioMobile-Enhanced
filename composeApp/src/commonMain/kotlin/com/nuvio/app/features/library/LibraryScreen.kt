@@ -1,17 +1,26 @@
 package com.nuvio.app.features.library
 
+import androidx.compose.material.icons.rounded.CalendarMonth
+import com.nuvio.app.core.ui.background.isGlassUiActive
+import com.nuvio.app.core.ui.background.appGlassBackdrop
+import com.nuvio.app.core.ui.background.appBackgroundCover
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.animation.Crossfade
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
@@ -114,15 +123,24 @@ import com.nuvio.app.core.ui.NuvioShelfSection
 import com.nuvio.app.core.ui.NuvioViewAllPillSize
 import com.nuvio.app.core.ui.ScopedDisintegrationTracker
 import com.nuvio.app.core.ui.nuvioConsumePointerEvents
+import com.nuvio.app.core.ui.LocalVerticalBarPadding
+import com.nuvio.app.core.ui.nuvioHorizontalScrollBleed
 import com.nuvio.app.features.cloud.CloudLibraryFile
 import com.nuvio.app.features.cloud.CloudLibraryItem
 import com.nuvio.app.features.cloud.CloudLibraryItemType
 import com.nuvio.app.features.cloud.CloudLibraryRepository
 import com.nuvio.app.features.cloud.CloudLibraryUiState
+import com.nuvio.app.features.cloud.TorboxCloudConnectDialog
+import com.nuvio.app.core.ui.DialogButton
+import com.nuvio.app.core.ui.DialogButtonStyle
+import com.nuvio.app.features.debrid.DebridProviders
 import com.nuvio.app.features.debrid.DebridSettingsRepository
 import com.nuvio.app.features.details.MetaDetailsRepository
 import com.nuvio.app.features.details.MetaVideo
+import com.nuvio.app.features.home.HomeCatalogSection
+import com.nuvio.app.features.home.MetaPreview
 import com.nuvio.app.features.home.components.HomeEmptyStateCard
+import com.nuvio.app.features.servers.ServerRepository
 import com.nuvio.app.features.home.components.HomePosterCard
 import com.nuvio.app.features.home.components.HomeSkeletonRow
 import com.nuvio.app.features.profiles.ProfileRepository
@@ -154,6 +172,10 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import com.nuvio.app.core.poster.CustomPosterScreen
+import com.nuvio.app.core.poster.CustomPosterUrlRepository
+import com.nuvio.app.core.poster.withCustomPosterUrl
+import com.nuvio.app.core.ui.rememberScreenActiveInfiniteFloat
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -174,12 +196,23 @@ fun LibraryScreen(
     onCloudFilePlay: ((CloudLibraryItem, CloudLibraryFile) -> Unit)? = null,
     onConnectCloudClick: (() -> Unit)? = null,
     disintegrationRequest: DisintegrationRequest<String>? = null,
+    onCatalogClick: ((HomeCatalogSection) -> Unit)? = null,
+    onPreviewClick: ((MetaPreview) -> Unit)? = null,
+    onPreviewLongClick: ((MetaPreview) -> Unit)? = null,
     onDownloadsClick: (() -> Unit)? = null,
 ) {
     val uiState by remember {
         LibraryRepository.ensureLoaded()
         LibraryRepository.uiState
     }.collectAsStateWithLifecycle()
+    val libraryPosterPattern by remember {
+        CustomPosterUrlRepository.ensureLoaded()
+        CustomPosterUrlRepository.pattern
+    }.collectAsStateWithLifecycle()
+    val libraryPosterScreens by CustomPosterUrlRepository.enabledScreens.collectAsStateWithLifecycle()
+    val effectivePosterPattern = remember(libraryPosterPattern, libraryPosterScreens) {
+        if (CustomPosterScreen.LIBRARY in libraryPosterScreens) libraryPosterPattern else ""
+    }
     val cloudUiState by CloudLibraryRepository.uiState.collectAsStateWithLifecycle()
     val cloudSettings by remember {
         DebridSettingsRepository.ensureLoaded()
@@ -198,9 +231,16 @@ fun LibraryScreen(
     val unknownReleaseLabel = stringResource(Res.string.generic_unknown)
     var observedOfflineState by remember { mutableStateOf(false) }
     var hydratedReleaseInfo by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    val serversUiState by remember {
+        ServerRepository.ensureLoaded()
+        ServerRepository.uiState
+    }.collectAsStateWithLifecycle()
+    val hasServers = serversUiState.connections.any { it.enabled }
     var sourceModeName by rememberSaveable { mutableStateOf(LibraryViewMode.Saved.name) }
-    val sourceMode = remember(sourceModeName) {
+    val sourceMode = remember(sourceModeName, hasServers) {
         runCatching { LibraryViewMode.valueOf(sourceModeName) }.getOrDefault(LibraryViewMode.Saved)
+            .takeUnless { it == LibraryViewMode.Servers && !hasServers }
+            ?: LibraryViewMode.Saved
     }
     var showReleaseCalendar by rememberSaveable { mutableStateOf(false) }
     val releaseCalendarCacheState by LibraryReleaseCalendarCache.state.collectAsStateWithLifecycle()
@@ -223,13 +263,18 @@ fun LibraryScreen(
         } else {
             0
         }
+    var serverShelves by remember { mutableStateOf<List<LibraryServerShelf>?>(null) }
+    var serverShelvesRequest by remember { mutableStateOf(0) }
     var selectedProviderId by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedTypeName by rememberSaveable { mutableStateOf<String?>(null) }
     var cloudSearchQuery by rememberSaveable { mutableStateOf("") }
+    var cloudSearchVisible by rememberSaveable { mutableStateOf(false) }
     val selectedType = remember(selectedTypeName) {
         selectedTypeName?.let { runCatching { CloudLibraryItemType.valueOf(it) }.getOrNull() }
     }
     var selectedCloudItemKey by rememberSaveable { mutableStateOf<String?>(null) }
+    var showTorboxConnectDialog by rememberSaveable { mutableStateOf(false) }
+    val torboxConnected = cloudSettings.apiKeyFor(DebridProviders.TORBOX_ID).isNotBlank()
     var selectedLibrarySectionKey by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedLibraryType by rememberSaveable { mutableStateOf<String?>(null) }
     val coroutineScope = rememberCoroutineScope()
@@ -341,7 +386,7 @@ fun LibraryScreen(
     }
 
     LaunchedEffect(sourceMode, uiState.items) {
-        if (sourceMode == LibraryViewMode.Cloud) return@LaunchedEffect
+        if (sourceMode != LibraryViewMode.Saved) return@LaunchedEffect
         val missingItems = uiState.items
             .filter { item -> item.releaseInfo.isNullOrBlank() }
             .distinctBy(LibraryItem::libraryReleaseInfoKey)
@@ -374,6 +419,10 @@ fun LibraryScreen(
         }
     }
 
+    LaunchedEffect(sourceMode, serversUiState.revision, serverShelvesRequest) {
+        if (sourceMode == LibraryViewMode.Servers) serverShelves = loadServerShelves()
+    }
+
     ScreenActivityEffect(sourceMode, cloudSettings.cloudLibraryEnabled, cloudSettings.providerApiKeys) { screenActive ->
         if (screenActive && sourceMode == LibraryViewMode.Cloud) {
             CloudLibraryRepository.ensureLoaded()
@@ -389,7 +438,7 @@ fun LibraryScreen(
 
     val disintegration = remember { LibraryDisintegrationHolder() }
     val librarySectionsDisplay = if (
-        sourceMode != LibraryViewMode.Cloud &&
+        sourceMode == LibraryViewMode.Saved &&
         displaySettings.layoutMode == LibraryLayoutMode.HORIZONTAL &&
         uiState.isLoaded &&
         sortedSections.isNotEmpty()
@@ -406,12 +455,14 @@ fun LibraryScreen(
     }
 
     Column(modifier = modifier.fillMaxSize()) {
-        Box(modifier = Modifier.fillMaxWidth()) {
+        Box(modifier = Modifier.fillMaxWidth().appBackgroundCover(Color.Transparent)) {
             androidx.compose.foundation.layout.Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(LocalVerticalBarPadding.current),
             ) {
                 NuvioScreenHeader(
-                    title = if (sourceMode == LibraryViewMode.Cloud) {
+                    title = if (sourceMode != LibraryViewMode.Saved) {
                         stringResource(Res.string.library_title)
                     } else {
                         when (uiState.sourceMode) {
@@ -419,12 +470,16 @@ fun LibraryScreen(
                             LibrarySourceMode.TRAKT -> stringResource(Res.string.library_trakt_title)
                             LibrarySourceMode.SIMKL -> stringResource(Res.string.library_simkl_title)
                             LibrarySourceMode.MDBLIST -> stringResource(Res.string.library_mdblist_title)
+                            LibrarySourceMode.ANILIST -> stringResource(Res.string.library_anilist_title)
+                            LibrarySourceMode.WETRAKR -> stringResource(Res.string.library_wetrakr_title)
+                            LibrarySourceMode.PUBLICMETADB -> stringResource(Res.string.library_publicmetadb_title)
                         }
                     },
                     modifier = Modifier.padding(horizontal = 16.dp),
                 )
                 LibrarySourceSwitch(
                     selectedMode = sourceMode,
+                    showServers = hasServers,
                     onModeSelected = { mode ->
                         sourceModeName = mode.name
                     },
@@ -463,7 +518,7 @@ fun LibraryScreen(
                             }
                         }
                     }
-                    if (sourceMode != LibraryViewMode.Cloud) {
+                    if (sourceMode == LibraryViewMode.Saved) {
                         val openCalendarLabel = stringResource(Res.string.library_calendar_open)
                         IconButton(
                             onClick = { showReleaseCalendar = true },
@@ -471,10 +526,30 @@ fun LibraryScreen(
                                 .size(40.dp)
                                 .semantics { contentDescription = openCalendarLabel },
                         ) {
-                            LibraryCalendarGlyph(
-                                modifier = Modifier.size(19.dp),
+                            Icon(
+                                imageVector = Icons.Rounded.CalendarMonth,
+                                contentDescription = null,
+                                modifier = Modifier.size(22.dp),
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                cutoutColor = MaterialTheme.colorScheme.background,
+                            )
+                        }
+                    }
+                    if (sourceMode == LibraryViewMode.Cloud) {
+                        val cloudSearchLabel = stringResource(Res.string.cloud_library_search_label)
+                        IconButton(
+                            onClick = {
+                                if (cloudSearchVisible) cloudSearchQuery = ""
+                                cloudSearchVisible = !cloudSearchVisible
+                            },
+                            modifier = Modifier
+                                .size(40.dp)
+                                .semantics { contentDescription = cloudSearchLabel },
+                        ) {
+                            Icon(
+                                imageVector = if (cloudSearchVisible) Icons.Rounded.Close else Icons.Rounded.Search,
+                                contentDescription = null,
+                                modifier = Modifier.size(22.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                         }
                     }
@@ -513,6 +588,7 @@ fun LibraryScreen(
                     selectedType = selectedType,
                     selectedCloudItemKey = selectedCloudItemKey,
                     searchQuery = cloudSearchQuery,
+                    searchVisible = cloudSearchVisible,
                     onSearchQueryChange = {
                         cloudSearchQuery = it
                         selectedCloudItemKey = null
@@ -537,6 +613,19 @@ fun LibraryScreen(
                     onBackToItems = { selectedCloudItemKey = null },
                     onRefresh = { CloudLibraryRepository.refresh() },
                     onConnectCloudClick = onConnectCloudClick,
+                    onConnectTorboxApiKeyClick = if (torboxConnected) null else {
+                        { showTorboxConnectDialog = true }
+                    },
+                )
+            } else if (sourceMode == LibraryViewMode.Servers) {
+                serverLibraryContent(
+                    shelves = serverShelves,
+                    watchedKeys = watchedUiState.watchedKeys,
+                    fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
+                    onCatalogClick = onCatalogClick,
+                    onPosterClick = onPreviewClick,
+                    onPosterLongClick = onPreviewLongClick,
+                    onRetry = { serverShelvesRequest++ },
                 )
             } else {
                 when {
@@ -568,6 +657,9 @@ fun LibraryScreen(
                                         LibrarySourceMode.TRAKT -> stringResource(Res.string.library_trakt_load_failed)
                                         LibrarySourceMode.SIMKL -> stringResource(Res.string.library_simkl_load_failed)
                                         LibrarySourceMode.MDBLIST -> stringResource(Res.string.library_mdblist_load_failed)
+                                        LibrarySourceMode.ANILIST -> stringResource(Res.string.library_anilist_load_failed)
+                                        LibrarySourceMode.WETRAKR -> stringResource(Res.string.library_wetrakr_load_failed)
+                                        LibrarySourceMode.PUBLICMETADB -> stringResource(Res.string.library_publicmetadb_load_failed)
                                     },
                                     message = uiState.errorMessage.orEmpty(),
                                     actionLabel = stringResource(Res.string.action_retry),
@@ -586,12 +678,18 @@ fun LibraryScreen(
                                     LibrarySourceMode.TRAKT -> stringResource(Res.string.library_trakt_empty_title)
                                     LibrarySourceMode.SIMKL -> stringResource(Res.string.library_simkl_empty_title)
                                     LibrarySourceMode.MDBLIST -> stringResource(Res.string.library_mdblist_empty_title)
+                                    LibrarySourceMode.ANILIST -> stringResource(Res.string.library_anilist_empty_title)
+                                    LibrarySourceMode.WETRAKR -> stringResource(Res.string.library_wetrakr_empty_title)
+                                    LibrarySourceMode.PUBLICMETADB -> stringResource(Res.string.library_publicmetadb_empty_title)
                                 },
                                 message = when (uiState.sourceMode) {
                                     LibrarySourceMode.LOCAL -> stringResource(Res.string.library_empty_message)
                                     LibrarySourceMode.TRAKT -> stringResource(Res.string.library_trakt_empty_message)
                                     LibrarySourceMode.SIMKL -> stringResource(Res.string.library_simkl_empty_message)
                                     LibrarySourceMode.MDBLIST -> stringResource(Res.string.library_mdblist_empty_message)
+                                    LibrarySourceMode.ANILIST -> stringResource(Res.string.library_anilist_empty_message)
+                                    LibrarySourceMode.WETRAKR -> stringResource(Res.string.library_wetrakr_empty_message)
+                                    LibrarySourceMode.PUBLICMETADB -> stringResource(Res.string.library_publicmetadb_empty_message)
                                 },
                             )
                         }
@@ -606,7 +704,7 @@ fun LibraryScreen(
                                 Box(
                                     modifier = Modifier
                                         .matchParentSize()
-                                        .background(MaterialTheme.colorScheme.background)
+                                        .appBackgroundCover(MaterialTheme.colorScheme.background)
                                         .nuvioConsumePointerEvents(),
                                 )
                                 LibrarySavedControls(
@@ -633,6 +731,7 @@ fun LibraryScreen(
                                 watchedKeys = watchedUiState.watchedKeys,
                                 fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
                                 sortOption = effectiveSortOption,
+                                posterPattern = effectivePosterPattern,
                                 onPosterClick = onPosterClick,
                                 onSectionViewAllClick = onSectionViewAllClick,
                                 onPosterLongClick = onPosterLongClick,
@@ -644,6 +743,7 @@ fun LibraryScreen(
                                 releaseInfoFor = releaseInfoFor,
                                 watchedKeys = watchedUiState.watchedKeys,
                                 fullyWatchedSeriesKeys = fullyWatchedSeriesKeys,
+                                posterPattern = effectivePosterPattern,
                                 onPosterClick = onPosterClick,
                                 onPosterLongClick = onPosterLongClick,
                             )
@@ -680,6 +780,13 @@ fun LibraryScreen(
             },
         )
     }
+
+    if (showTorboxConnectDialog) {
+        TorboxCloudConnectDialog(
+            onDismiss = { showTorboxConnectDialog = false },
+            onConnected = { selectedCloudItemKey = null },
+        )
+    }
 }
 
 private fun LazyListScope.cloudLibraryContent(
@@ -688,6 +795,7 @@ private fun LazyListScope.cloudLibraryContent(
     selectedType: CloudLibraryItemType?,
     selectedCloudItemKey: String?,
     searchQuery: String,
+    searchVisible: Boolean,
     onSearchQueryChange: (String) -> Unit,
     onProviderSelected: (String?) -> Unit,
     onTypeSelected: (CloudLibraryItemType?) -> Unit,
@@ -696,6 +804,7 @@ private fun LazyListScope.cloudLibraryContent(
     onBackToItems: () -> Unit,
     onRefresh: () -> Unit,
     onConnectCloudClick: (() -> Unit)?,
+    onConnectTorboxApiKeyClick: (() -> Unit)? = null,
 ) {
     when {
         !uiState.isLoaded -> {
@@ -712,6 +821,11 @@ private fun LazyListScope.cloudLibraryContent(
                     onActionClick = onConnectCloudClick,
                 )
             }
+            cloudLibraryTorboxApiKeyConnectItem(onConnectTorboxApiKeyClick)
+        }
+
+        !uiState.hasConnectedProvider && uiState.isRefreshing -> {
+            cloudLibrarySkeletonItems()
         }
 
         !uiState.hasConnectedProvider -> {
@@ -724,6 +838,7 @@ private fun LazyListScope.cloudLibraryContent(
                     onActionClick = onConnectCloudClick,
                 )
             }
+            cloudLibraryTorboxApiKeyConnectItem(onConnectTorboxApiKeyClick)
         }
 
         else -> {
@@ -757,25 +872,39 @@ private fun LazyListScope.cloudLibraryContent(
                     )
                 }
             } else {
-                item {
-                    CloudLibraryToolbar(
-                        uiState = uiState,
-                        selectedProviderId = selectedProviderId,
-                        selectedType = effectiveSelectedType,
-                        availableTypes = availableTypes,
-                        onProviderSelected = onProviderSelected,
-                        onTypeSelected = onTypeSelected,
-                        onRefresh = onRefresh,
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                    )
-                }
-
-                item(key = "cloud-library-search") {
-                    CloudLibrarySearchField(
-                        query = searchQuery,
-                        onQueryChange = onSearchQueryChange,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    )
+                stickyHeader(key = "cloud-library-search") {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .appBackgroundCover(MaterialTheme.colorScheme.background)
+                            .nuvioConsumePointerEvents(),
+                    ) {
+                        CloudLibraryToolbar(
+                            uiState = uiState,
+                            selectedProviderId = selectedProviderId,
+                            selectedType = effectiveSelectedType,
+                            availableTypes = availableTypes,
+                            onProviderSelected = onProviderSelected,
+                            onTypeSelected = onTypeSelected,
+                            onRefresh = onRefresh,
+                            modifier = Modifier.padding(horizontal = 16.dp),
+                        )
+                        AnimatedVisibility(
+                            visible = searchVisible,
+                            enter = expandVertically() + fadeIn(),
+                            exit = shrinkVertically() + fadeOut(),
+                        ) {
+                            val focusRequester = remember { FocusRequester() }
+                            LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
+                            CloudLibrarySearchField(
+                                query = searchQuery,
+                                onQueryChange = onSearchQueryChange,
+                                modifier = Modifier
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                                    .focusRequester(focusRequester),
+                            )
+                        }
+                    }
                 }
 
                 val visibleProviderStates = uiState.providers.filter { providerState ->
@@ -868,6 +997,22 @@ private fun CloudLibrarySearchField(
     )
 }
 
+private fun LazyListScope.cloudLibraryTorboxApiKeyConnectItem(
+    onClick: (() -> Unit)?,
+) {
+    if (onClick == null) return
+    item(key = "cloud-library-connect-torbox-api-key") {
+        DialogButton(
+            text = stringResource(Res.string.cloud_library_connect_torbox_api_key),
+            onClick = onClick,
+            modifier = Modifier
+                .padding(start = 16.dp, end = 16.dp, top = 12.dp)
+                .fillMaxWidth(),
+            style = DialogButtonStyle.Secondary,
+        )
+    }
+}
+
 private fun LazyListScope.cloudLibrarySkeletonItems() {
     item(key = "cloud-library-skeleton-toolbar") {
         CloudLibrarySkeletonToolbar(
@@ -882,6 +1027,7 @@ private fun LazyListScope.cloudLibrarySkeletonItems() {
 @Composable
 private fun LibrarySourceSwitch(
     selectedMode: LibraryViewMode,
+    showServers: Boolean,
     onModeSelected: (LibraryViewMode) -> Unit,
     modifier: Modifier = Modifier,
     trailingActions: @Composable RowScope.() -> Unit = {},
@@ -901,6 +1047,13 @@ private fun LibrarySourceSwitch(
             selected = selectedMode == LibraryViewMode.Cloud,
             onClick = { onModeSelected(LibraryViewMode.Cloud) },
         )
+        if (showServers) {
+            LibraryChip(
+                label = stringResource(Res.string.library_source_servers),
+                selected = selectedMode == LibraryViewMode.Servers,
+                onClick = { onModeSelected(LibraryViewMode.Servers) },
+            )
+        }
         Spacer(modifier = Modifier.weight(1f))
         Row(
             horizontalArrangement = Arrangement.spacedBy(0.dp),
@@ -1391,8 +1544,7 @@ private fun rememberCloudLibrarySkeletonBrush(): Brush {
         MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.48f),
         MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.9f),
     )
-    val transition = rememberInfiniteTransition()
-    val translateAnim by transition.animateFloat(
+    val translateAnim by rememberScreenActiveInfiniteFloat(
         initialValue = 0f,
         targetValue = 1000f,
         animationSpec = infiniteRepeatable(
@@ -1502,10 +1654,11 @@ private fun LibraryReleaseCalendarPanel(
                     .widthIn(max = 760.dp)
                     .fillMaxWidth()
                     .height(panelHeight)
+                    .appGlassBackdrop(RoundedCornerShape(28.dp))
                     .clickable(onClick = {}),
                 color = MaterialTheme.colorScheme.surface,
                 shape = RoundedCornerShape(28.dp),
-                shadowElevation = 18.dp,
+                shadowElevation = if (isGlassUiActive()) 0.dp else 18.dp,
             ) {
                 Column(
                     modifier = Modifier
@@ -1868,6 +2021,7 @@ private fun LazyListScope.librarySections(
     watchedKeys: Set<String>,
     fullyWatchedSeriesKeys: Set<String>,
     sortOption: LibrarySortOption,
+    posterPattern: String,
     onPosterClick: ((LibraryItem) -> Unit)?,
     onSectionViewAllClick: ((LibrarySection, LibrarySortOption) -> Unit)?,
     onPosterLongClick: ((LibraryItem, LibrarySection) -> Unit)?,
@@ -1878,7 +2032,7 @@ private fun LazyListScope.librarySections(
         key = { section -> "library-horizontal:${section.type}" },
     ) { section ->
         NuvioShelfSection(
-            title = section.displayTitle,
+            title = localizedLibrarySectionTitle(section.type, section.displayTitle),
             entries = section.previewEntries,
             modifier = libraryContentTransitionModifier(),
             headerHorizontalPadding = 16.dp,
@@ -1891,7 +2045,11 @@ private fun LazyListScope.librarySections(
             animatePlacement = true,
         ) { entry ->
             val item = entry.item
-            val posterItem = item.toMetaPreview().copy(releaseInfo = releaseInfoFor(item))
+            val posterItem = remember(item, posterPattern, releaseInfoFor) {
+                item.toMetaPreview()
+                    .copy(releaseInfo = releaseInfoFor(item))
+                    .let { if (posterPattern.isNotBlank()) it.withCustomPosterUrl(posterPattern) else it }
+            }
             val entrySource = entry.section
             DisintegratingContainer(
                 disintegrating = entry.exiting,
@@ -2095,13 +2253,13 @@ private fun LibraryCalendarCard(
 @Composable
 private fun LibraryCalendarWeekdayHeader() {
     val labels = listOf(
-        stringResource(Res.string.library_calendar_weekday_sun),
         stringResource(Res.string.library_calendar_weekday_mon),
         stringResource(Res.string.library_calendar_weekday_tue),
         stringResource(Res.string.library_calendar_weekday_wed),
         stringResource(Res.string.library_calendar_weekday_thu),
         stringResource(Res.string.library_calendar_weekday_fri),
         stringResource(Res.string.library_calendar_weekday_sat),
+        stringResource(Res.string.library_calendar_weekday_sun),
     )
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -2578,7 +2736,6 @@ private object LibraryReleaseCalendarCache {
                 if (latest.cacheKey == cacheKey) {
                     _state.value = latest.copy(
                         events = (latest.events + result.events).sortedLibraryCalendarEvents(),
-                        // Leave the month unloaded when a series failed, so it is requested again.
                         loadedMonthKeys = if (result.failedSeriesKeys.isEmpty()) {
                             latest.loadedMonthKeys + monthKey
                         } else {
@@ -2758,7 +2915,6 @@ private object LibraryReleaseCalendarCache {
                 .collect { signature ->
                     if (signature == null) return@collect
                     if (_state.value.addonSignature != signature) {
-                        // Addons became ready or changed: failures may now succeed.
                         resetRetry()
                         refreshIfStale()
                     }
@@ -3007,7 +3163,7 @@ private fun libraryCalendarCells(month: LibraryCalendarMonth): List<LibraryCalen
 
 private fun firstLibraryCalendarWeekdayOffset(year: Int, month: Int): Int {
     val epochDay = isoEpochDay(LibraryCalendarDate(year, month, 1).iso)
-    val raw = (epochDay + 4L) % 7L
+    val raw = (epochDay + 3L) % 7L
     return if (raw < 0L) (raw + 7L).toInt() else raw.toInt()
 }
 
@@ -3039,6 +3195,7 @@ private fun isoEpochDay(date: String): Long {
 private enum class LibraryViewMode {
     Saved,
     Cloud,
+    Servers,
 }
 
 private const val LIBRARY_SECTION_PREVIEW_LIMIT = 18
@@ -3133,7 +3290,6 @@ private class LibraryDisintegrationHolder {
     }
 }
 
-/** An episode from the Library release calendar, exposed for other screens (Profile Insight). */
 internal data class LibraryUpcomingEpisode(
     val key: String,
     val item: LibraryItem,
@@ -3148,10 +3304,6 @@ internal suspend fun warmLibraryReleaseSchedule(items: List<LibraryItem>) {
     if (items.isNotEmpty()) LibraryReleaseCalendarCache.warm(items)
 }
 
-/**
- * Episodes of saved series airing from today through the next [days] days (today included),
- * read from the same release-calendar cache the Library calendar shows, so both always agree.
- */
 internal fun libraryUpcomingEpisodesFlow(days: Int = 7): Flow<List<LibraryUpcomingEpisode>> =
     LibraryReleaseCalendarCache.state.map { state -> state.events.upcomingEpisodes(days) }
 

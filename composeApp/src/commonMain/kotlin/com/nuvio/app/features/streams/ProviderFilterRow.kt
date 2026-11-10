@@ -57,6 +57,7 @@ import com.nuvio.app.core.ui.dismissNuvioBottomSheet
 import com.nuvio.app.core.ui.nuvioSafeBottomPadding
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import com.nuvio.app.core.ui.backdropControlColor
 import nuvio.composeapp.generated.resources.Res
 import nuvio.composeapp.generated.resources.collections_tab_all
 import nuvio.composeapp.generated.resources.streams_pin_source
@@ -64,6 +65,7 @@ import nuvio.composeapp.generated.resources.streams_pinned_source
 import nuvio.composeapp.generated.resources.streams_refresh
 import nuvio.composeapp.generated.resources.streams_unpin_source
 import org.jetbrains.compose.resources.stringResource
+import com.nuvio.app.core.ui.glass.ambientLiquidGlass
 
 @Composable
 internal fun ProviderFilterRow(
@@ -259,7 +261,7 @@ private fun FilterChip(
         targetValue = if (isSelected) {
             MaterialTheme.colorScheme.primary
         } else {
-            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+            backdropControlColor(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f))
         },
         animationSpec = tween(durationMillis = 180),
         label = "filter_chip_container",
@@ -281,7 +283,13 @@ private fun FilterChip(
             }
             .height(36.dp)
             .clip(RoundedCornerShape(16.dp))
-            .background(containerColor)
+            .ambientLiquidGlass(
+                shape = RoundedCornerShape(16.dp),
+                tint = containerColor,
+                fallback = containerColor,
+                blurRadius = 14.dp,
+                refractionHeight = 8.dp,
+            )
             .combinedClickable(
                 interactionSource = interactionSource,
                 indication = null,

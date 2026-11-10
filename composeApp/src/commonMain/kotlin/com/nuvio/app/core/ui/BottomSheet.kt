@@ -1,5 +1,7 @@
 package com.nuvio.app.core.ui
 
+import com.nuvio.app.core.ui.background.isGlassUiActive
+import com.nuvio.app.core.ui.background.appGlassBackdrop
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -23,16 +26,70 @@ import androidx.compose.material3.SheetState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Stable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import com.nuvio.app.core.ui.glass.NuvioBackdrop
+import com.nuvio.app.core.ui.glass.isLiquidGlassSupported
+import com.nuvio.app.core.ui.glass.liquidGlassSurface
+import com.nuvio.app.core.ui.glass.nuvioBackdropSource
 
 private val SheetShape = RoundedCornerShape(NuvioTokens.Space.s28)
+
+internal fun Modifier.nuvioSheetSurface(
+    backdrop: NuvioBackdrop?,
+    shape: Shape,
+    containerColor: Color,
+    withHighlight: Boolean = true,
+): Modifier {
+    val readyBackdrop = backdrop?.takeIf { it.isReady && isLiquidGlassSupported() }
+    return liquidGlassSurface(
+        backdrop = readyBackdrop,
+        shape = shape,
+        tint = containerColor.copy(alpha = containerColor.alpha * 0.65f),
+        fallback = containerColor,
+        blurRadius = 24.dp,
+        refractionHeight = 16.dp,
+        refractionAmount = 32.dp,
+        withHighlight = withHighlight,
+    )
+}
+
+@Stable
+class NuvioSheetBackdrop(val backdrop: NuvioBackdrop) {
+    var activeSheets by mutableIntStateOf(0)
+}
+
+val LocalNuvioSheetBackdrop = staticCompositionLocalOf<NuvioSheetBackdrop?> { null }
+
+@Composable
+fun NuvioSheetBackdropHost(
+    sheetBackdrop: NuvioSheetBackdrop,
+    content: @Composable () -> Unit,
+) {
+    CompositionLocalProvider(LocalNuvioSheetBackdrop provides sheetBackdrop) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (sheetBackdrop.activeSheets > 0 && isLiquidGlassSupported()) Modifier.nuvioBackdropSource(sheetBackdrop.backdrop) else Modifier),
+        ) {
+            content()
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -46,7 +103,7 @@ fun NuvioModalBottomSheet(
     fullHeight: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
-    if (usesNativeNuvioBottomSheet) {
+    if (usesNativeNuvioBottomSheet && !isGlassUiActive()) {
         NuvioNativeModalBottomSheet(
             onDismissRequest = onDismissRequest,
             modifier = modifier,
@@ -58,6 +115,14 @@ fun NuvioModalBottomSheet(
         )
     } else {
         val tokens = MaterialTheme.nuvio
+        val sheetBackdrop = LocalNuvioSheetBackdrop.current
+        if (sheetBackdrop != null) {
+            DisposableEffect(sheetBackdrop) {
+                sheetBackdrop.activeSheets += 1
+                onDispose { sheetBackdrop.activeSheets -= 1 }
+            }
+        }
+        val sheetGlassReady = sheetBackdrop != null && sheetBackdrop.backdrop.isReady && isLiquidGlassSupported()
         ModalBottomSheet(
             onDismissRequest = onDismissRequest,
             sheetState = sheetState,
@@ -71,9 +136,14 @@ fun NuvioModalBottomSheet(
                 Column(
                     modifier = modifier
                         .padding(NuvioTokens.Space.s10)
+                        .appGlassBackdrop(SheetShape)
                         .clip(SheetShape)
-                        .background(containerColor)
-                        .border(tokens.borders.thin, SurfaceEdge, SheetShape),
+                        .nuvioSheetSurface(
+                            backdrop = sheetBackdrop?.backdrop,
+                            shape = SheetShape,
+                            containerColor = containerColor,
+                        )
+                        .then(if (sheetGlassReady) Modifier else Modifier.border(tokens.borders.thin, SurfaceEdge, SheetShape)),
                 ) {
                     if (showDragHandle) {
                         NuvioBottomSheetDragHandle(Modifier.align(Alignment.CenterHorizontally))

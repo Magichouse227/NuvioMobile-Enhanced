@@ -23,6 +23,37 @@ internal fun List<TmdbImage>.selectBestLocalizedImagePath(normalizedLanguage: St
     ).firstOrNull()?.filePath?.trim()
 }
 
+internal fun List<TmdbImage>.selectTitleLogoPath(
+    normalizedLanguage: String,
+    originalLanguage: String?,
+    preferOriginal: Boolean,
+): String? {
+    val languageCode = normalizedLanguage.substringBefore("-").lowercase()
+    val regionCode = normalizedLanguage.substringAfter("-", "").uppercase().takeIf { it.length == 2 }
+        ?: defaultLanguageRegions[languageCode]
+    val original = originalLanguage?.substringBefore("-")?.lowercase()?.takeIf(String::isNotBlank)
+    fun rank(image: TmdbImage): Int? {
+        val iso = image.iso6391?.lowercase()
+        return when {
+            preferOriginal && original != null && iso == original -> 0
+            iso == languageCode && image.iso31661 == regionCode -> 1
+            iso == languageCode && image.iso31661 == null -> 2
+            iso == languageCode -> 3
+            iso == "en" -> 4
+            original != null && iso == original -> 5
+            iso == null -> 6
+            else -> null
+        }
+    }
+    return asSequence()
+        .filter { !it.filePath.isNullOrBlank() }
+        .mapNotNull { image -> rank(image)?.let { image to it } }
+        .minByOrNull { it.second }
+        ?.first
+        ?.filePath
+        ?.trim()
+}
+
 private val defaultLanguageRegions = mapOf(
     "pt" to "PT",
     "es" to "ES",
@@ -32,6 +63,7 @@ private val defaultLanguageRegions = mapOf(
 internal data class TmdbImagesResponse(
     val logos: List<TmdbImage> = emptyList(),
     val backdrops: List<TmdbImage> = emptyList(),
+    val posters: List<TmdbImage> = emptyList(),
 )
 
 @Serializable

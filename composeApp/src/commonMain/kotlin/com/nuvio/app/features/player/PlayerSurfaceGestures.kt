@@ -2,12 +2,14 @@ package com.nuvio.app.features.player
 
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.runtime.State
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.IntSize
+import com.nuvio.app.core.logging.InAppLogger
 import kotlin.math.abs
 import kotlin.math.roundToLong
 
@@ -49,6 +51,7 @@ internal fun Modifier.playerSurfaceDragGestures(
     layoutSize: IntSize,
     playbackGesturesEnabled: Boolean,
     sideGestureSystemEdgeExclusionPx: Float,
+    horizontalSeekSystemEdgeExclusionPx: Float = 0f,
     playerControlsLockedState: State<Boolean>,
     touchGesturesEnabledState: State<Boolean>,
     swipeToSeekEnabledState: State<Boolean>,
@@ -68,18 +71,13 @@ internal fun Modifier.playerSurfaceDragGestures(
         playerController,
         layoutSize,
         sideGestureSystemEdgeExclusionPx,
+        horizontalSeekSystemEdgeExclusionPx,
         playbackGesturesEnabled,
     ) {
         if (!playbackGesturesEnabled) return@pointerInput
         awaitEachGesture {
             val down = awaitFirstDown()
             if (playerControlsLockedState.value) {
-                while (true) {
-                    val event = awaitPointerEvent()
-                    val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                    if (!change.pressed) break
-                    change.consume()
-                }
                 return@awaitEachGesture
             }
             if (!touchGesturesEnabledState.value) {
@@ -93,6 +91,12 @@ internal fun Modifier.playerSurfaceDragGestures(
             val isInSideGestureSystemEdge =
                 down.position.y <= sideGestureEdgeExclusionPx ||
                     down.position.y >= height - sideGestureEdgeExclusionPx
+            // A swipe that starts inside the system back gesture zone belongs to the OS.
+            // Starting a seek there would fight the back gesture and, when the system
+            // cancels the touch stream, the seek would still be committed on "release".
+            val backGestureEdgePx = horizontalSeekSystemEdgeExclusionPx.coerceAtMost(width * 0.25f)
+            val isInBackGestureEdge = backGestureEdgePx > 0f &&
+                (down.position.x <= backGestureEdgePx || down.position.x >= width - backGestureEdgePx)
             val region = when {
                 isInSideGestureSystemEdge -> null
                 down.position.x < width * PlayerLeftGestureBoundary -> PlayerSideGesture.Brightness
@@ -120,9 +124,15 @@ internal fun Modifier.playerSurfaceDragGestures(
             var verticalGestureActivationDy = 0f
             val horizontalSeekBaselineMs = currentPositionMsState.value
             var horizontalSeekPreviewMs = horizontalSeekBaselineMs
+            var lastVolumeTarget: Float? = null
+            var interruptedByPinch = false
 
             while (true) {
                 val event = awaitPointerEvent()
+                if (event.changes.count { it.pressed } > 1) {
+                    interruptedByPinch = true
+                    break
+                }
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 if (!change.pressed) break
 
@@ -141,6 +151,7 @@ internal fun Modifier.playerSurfaceDragGestures(
                     val horizontalDominant =
                         !holdToSpeedActive &&
                             swipeToSeekEnabledState.value &&
+                            !isInBackGestureEdge &&
                             abs(totalDx) > horizontalGestureActivationSlop &&
                             abs(totalDx) > abs(totalDy) * PlayerHorizontalGestureDominanceRatio
                     val verticalDominant =
@@ -168,6 +179,15 @@ internal fun Modifier.playerSurfaceDragGestures(
                     }
 
                     if (gestureMode == null) {
+                        // A moving finger is not a press-and-hold. Consuming the movement
+                        // cancels the pending long press in playerSurfaceTapGestures, so a
+                        // slow system back swipe from the edge does not trigger 2x speed.
+                        val touchSlop = viewConfiguration.touchSlop
+                        if (!holdToSpeedActive &&
+                            totalDx * totalDx + totalDy * totalDy > touchSlop * touchSlop
+                        ) {
+                            change.consume()
+                        }
                         continue
                     }
                 }
@@ -208,6 +228,7 @@ internal fun Modifier.playerSurfaceDragGestures(
                             (-activeTotalDy / height) * PlayerVerticalGestureSensitivity
                         val target = ((initialVolume?.fraction ?: 0f) + gestureDeltaFraction)
                             .coerceIn(0f, PlayerMaxVolumeBoost)
+                        lastVolumeTarget = target
                         setCombinedVolumeLevel(
                             target = target,
                             systemController = controller,
@@ -218,9 +239,51 @@ internal fun Modifier.playerSurfaceDragGestures(
                 change.consume()
             }
 
+            lastVolumeTarget?.let { target ->
+                val system = target.coerceAtMost(PlayerNormalVolumeCeiling)
+                val software = target.coerceAtLeast(PlayerNormalVolumeCeiling)
+                InAppLogger.debug(
+                    "Player/Gesture",
+                    "volume gesture end target=${formatVolumeFraction(target)} " +
+                        "system=${formatVolumeFraction(system)} software=${formatVolumeFraction(software)}",
+                )
+            }
+
+            if (interruptedByPinch) {
+                if (gestureMode == PlayerGestureMode.HorizontalSeek) clearLiveGestureFeedbackState.value()
+                return@awaitEachGesture
+            }
+
             if (gestureMode == PlayerGestureMode.HorizontalSeek && !isHoldToSpeedGestureActiveState.value) {
                 commitHorizontalSeekState.value(horizontalSeekPreviewMs)
                 clearLiveGestureFeedbackState.value()
             }
         }
     }
+
+internal fun Modifier.playerSurfacePinchGestures(
+    playbackGesturesEnabled: Boolean,
+    playerControlsLockedState: State<Boolean>,
+    touchGesturesEnabledState: State<Boolean>,
+    onPinchZoomState: State<(zoomFactor: Float) -> Unit>,
+): Modifier =
+    pointerInput(playbackGesturesEnabled) {
+        if (!playbackGesturesEnabled) return@pointerInput
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false)
+            do {
+                val event = awaitPointerEvent()
+                val multiTouch = event.changes.count { it.pressed } > 1
+                if (multiTouch && !playerControlsLockedState.value && touchGesturesEnabledState.value) {
+                    val zoom = event.calculateZoom()
+                    if (zoom != 1f) onPinchZoomState.value(zoom)
+                    event.changes.forEach { it.consume() }
+                }
+            } while (event.changes.any { it.pressed })
+        }
+    }
+
+private fun formatVolumeFraction(value: Float): String {
+    val hundredths = (value * 100f).roundToLong()
+    return "${hundredths / 100}.${(hundredths % 100).toString().padStart(2, '0')}"
+}

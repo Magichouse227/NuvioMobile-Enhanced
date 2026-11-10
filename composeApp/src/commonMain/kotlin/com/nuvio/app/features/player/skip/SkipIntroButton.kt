@@ -45,6 +45,7 @@ import nuvio.composeapp.generated.resources.player_skip_recap
 import nuvio.composeapp.generated.resources.player_skip_movie_credits
 import nuvio.composeapp.generated.resources.player_skip_to_post_credits
 import org.jetbrains.compose.resources.stringResource
+import com.nuvio.app.core.ui.glass.ambientLiquidGlass
 
 @Composable
 fun SkipIntroButton(
@@ -69,7 +70,10 @@ fun SkipIntroButton(
     var manuallyDismissed by remember { mutableStateOf(false) }
     val progress = remember { Animatable(0f) }
 
-    LaunchedEffect(interval?.startTime, interval?.type) {
+    // Reset auto-hide and progress when interval category changes (opening/ending/recap),
+    // but not when the same category switches provider (e.g. op[aniskip] -> intro[chapters]).
+    val intervalCategory = interval?.type?.let { segmentCategory(it) }
+    LaunchedEffect(intervalCategory) {
         autoHidden = false
         manuallyDismissed = false
         progress.snapTo(0f)
@@ -112,7 +116,14 @@ fun SkipIntroButton(
             modifier = Modifier
                 .width(IntrinsicSize.Max)
                 .clip(shape)
-                .background(Color(0xFF1E1E1E).copy(alpha = 0.85f))
+                .ambientLiquidGlass(
+                    shape = shape,
+                    tint = Color(0xFF1E1E1E).copy(alpha = 0.6f),
+                    fallback = Color(0xFF1E1E1E).copy(alpha = 0.85f),
+                    blurRadius = 18.dp,
+                    refractionHeight = 10.dp,
+                    refractionAmount = 14.dp,
+                )
                 .clickable(enabled = canSkip) { onSkip() },
         ) {
             Row(

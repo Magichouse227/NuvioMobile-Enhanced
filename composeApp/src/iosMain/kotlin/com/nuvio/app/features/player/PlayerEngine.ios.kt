@@ -7,6 +7,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -26,6 +27,11 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import co.touchlab.kermit.Logger
 import com.nuvio.app.core.logging.InAppLogger
+import com.nuvio.app.core.ui.collectAfterPlayback
+import com.nuvio.app.core.ui.trimImageMemoryForPlayback
+import com.nuvio.app.features.autosync.AutoSyncMpvCoordinator
+import com.nuvio.app.features.autosync.AutoSyncMpvEngineController
+import com.nuvio.app.features.autosync.IosAutoSyncMpvPlatform
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.useContents
 import kotlinx.coroutines.delay
@@ -56,6 +62,7 @@ actual fun PlatformPlayerSurface(
     initialPositionRequestKey: String?,
     resizeMode: PlayerResizeMode,
     playbackEngine: AndroidPlaybackEngine?,
+    animeContent: Boolean,
     useNativeController: Boolean,
     onInitialPositionHandled: (key: String, handled: Boolean) -> Unit,
     onControllerReady: (PlayerEngineController) -> Unit,
@@ -72,7 +79,11 @@ actual fun PlatformPlayerSurface(
     val latestPlayerSettings = rememberUpdatedState(playerSettings)
     val experimentalSinglePrimaryPictureInPictureEnabled =
         IosExperimentalPictureInPictureSettingsStorage.loadSinglePrimaryRendererEnabled()
+    var subtitleText by remember(sourceUrl) { mutableStateOf("") }
+    var subtitleStyle by remember { mutableStateOf(SubtitleStyleState.DEFAULT) }
 
+    LaunchedEffect(Unit) { trimImageMemoryForPlayback() }
+    DisposableEffect(Unit) { onDispose { collectAfterPlayback() } }
     val bridge = remember {
         NuvioPlayerBridgeFactory.create()
     }
@@ -88,7 +99,23 @@ actual fun PlatformPlayerSurface(
     bridge.setExperimentalSinglePrimaryPictureInPictureEnabled(experimentalSinglePrimaryPictureInPictureEnabled)
 
     val controller = remember(bridge) {
-        object : PlayerEngineController {
+        object : PlayerEngineController, PlayerSystemControlSource {
+            private var lastAppliedVolume: Float? = null
+            private var lastLoggedAudioTracks: String? = null
+
+            override fun networkSpeedBytesPerSecond(): Long? =
+                bridge.networkSpeedBytesPerSecond().takeIf { it >= 0L }
+
+            override val keepsPlaybackInBackground: Boolean
+                get() = bridge.getKeepsPlaybackInBackground()
+
+            override val supportsNightMode: Boolean
+                get() = bridge.isNightModeSupported()
+
+            override fun setSystemControlHandler(handler: PlayerSystemControlHandler?) {
+                bridge.setSystemControlHandler(handler)
+            }
+
             override fun play() {
                 InAppLogger.debug("Player/iOS", "control play positionMs=${bridge.getPositionMs()}")
                 bridge.play()
@@ -143,6 +170,10 @@ actual fun PlatformPlayerSurface(
                 bridge.startPictureInPicture()
             }
 
+            override fun setVideoZoom(scale: Float) {
+                bridge.setVideoZoom(scale.toDouble())
+            }
+
             override fun configureIosVideoOutput(settings: PlayerSettingsUiState) {
                 bridge.applyIosVideoOutputSettings(settings)
             }
@@ -162,8 +193,10 @@ actual fun PlatformPlayerSurface(
 
             override fun setPlayerVolume(level: Float): PlayerAudioLevel {
                 val target = level.coerceIn(0f, 2f)
-                InAppLogger.debug("Player/iOS", "control volume target=$target muted=${target <= 0.001f}")
-                bridge.setVolume(target)
+                if (target != lastAppliedVolume) {
+                    lastAppliedVolume = target
+                    bridge.setVolume(target)
+                }
                 return PlayerAudioLevel(
                     fraction = target,
                     isMuted = target <= 0.001f,
@@ -186,10 +219,12 @@ actual fun PlatformPlayerSurface(
                         isSelected = bridge.isAudioTrackSelected(i),
                     )
                 }
-                InAppLogger.debug(
-                    "Player/iOS",
-                    "getAudioTracks count=${tracks.size} selected=${tracks.firstOrNull { it.isSelected }?.index ?: -1}",
-                )
+                val tracksLog =
+                    "getAudioTracks count=${tracks.size} selected=${tracks.firstOrNull { it.isSelected }?.index ?: -1}"
+                if (tracksLog != lastLoggedAudioTracks) {
+                    lastLoggedAudioTracks = tracksLog
+                    InAppLogger.debug("Player/iOS", tracksLog)
+                }
                 return tracks
             }
 
@@ -339,6 +374,7 @@ actual fun PlatformPlayerSurface(
                     "Player/iOS",
                     "apply subtitle style font=${style.fontSizeSp} bold=${style.bold} outline=${style.outlineEnabled}:${style.outlineWidth} bottom=${style.bottomOffset}",
                 )
+                subtitleStyle = style
                 bridge.applySubtitleStyle(
                     textColor = style.textColor.toMpvColorString(),
                     backgroundColor = style.backgroundColor.toMpvColorString(),
@@ -348,6 +384,8 @@ actual fun PlatformPlayerSurface(
                     fontSize = style.toMpvSubtitleFontSize(),
                     subPos = style.toMpvSubtitlePosition(),
                     stripSdh = style.stripSdh,
+                    styledOverlay = style.requiresComposeStyledOverlay,
+                    outlineBlur = style.mpvNativeOutlineBlurLevel,
                 )
             }
 
@@ -368,8 +406,36 @@ actual fun PlatformPlayerSurface(
         }
     }
 
-    LaunchedEffect(controller, sourceUrl, sourceAudioUrl, sourceHeaders, sourceResponseHeaders) {
-        latestOnControllerReady.value(controller)
+    // AutoSync: the original subtitle shows right away and a confident result replaces it.
+    val coroutineScope = rememberCoroutineScope()
+    val latestExternalSubtitles = rememberUpdatedState(externalSubtitles)
+    val sanitizedSourceHeaders = remember(sourceHeaders) { sanitizePlaybackHeaders(sourceHeaders) }
+    val autoSyncCoordinator = remember(sourceUrl, sanitizedSourceHeaders, coroutineScope) {
+        AutoSyncMpvCoordinator(
+            scope = coroutineScope,
+            sourceUrl = sourceUrl,
+            sourceHeaders = sanitizedSourceHeaders,
+            getSubtitleHeaders = { subtitleUrl ->
+                latestExternalSubtitles.value
+                    .firstOrNull { it.url == subtitleUrl }
+                    ?.headers
+                    .orEmpty()
+            },
+            getPreferredLanguage = { latestPlayerSettings.value.preferredSubtitleLanguage },
+            platform = IosAutoSyncMpvPlatform,
+        )
+    }
+    DisposableEffect(autoSyncCoordinator) {
+        onDispose { autoSyncCoordinator.dispose() }
+    }
+    val autoSyncController = remember(controller, autoSyncCoordinator) {
+        object :
+            AutoSyncMpvEngineController(controller, autoSyncCoordinator, bridge::replaceExternalSubtitle),
+            PlayerSystemControlSource by controller {}
+    }
+
+    LaunchedEffect(autoSyncController, sourceUrl, sourceAudioUrl, sourceHeaders, sourceResponseHeaders) {
+        latestOnControllerReady.value(autoSyncController)
     }
 
     // Load file and set initial state
@@ -418,21 +484,38 @@ actual fun PlatformPlayerSurface(
         bridge.applyIosVideoOutputSettings(playerSettings)
     }
 
+    val nightModeActive = playerSettings.nightModeActive
+    LaunchedEffect(bridge, nightModeActive) {
+        bridge.setNightMode(
+            enabled = nightModeActive,
+            filter = PlayerNightMode.MPV_FILTER,
+            label = PlayerNightMode.MPV_FILTER_LABEL,
+        )
+    }
+
     // Polling for snapshots
     LaunchedEffect(bridge) {
         var lastReportedError: String? = null
+        var chapters = emptyList<PlayerChapter>()
+        var chaptersDurationMs = 0L
         while (isActive) {
+            val durationMs = bridge.getDurationMs()
+            if (durationMs > 0L && durationMs != chaptersDurationMs) {
+                chaptersDurationMs = durationMs
+                chapters = mpvChapters { name -> bridge.getProperty(name).ifBlank { null } }
+            }
             val snapshot = PlayerPlaybackSnapshot(
                 isLoading = bridge.getIsLoading(),
                 isPlaying = bridge.getIsPlaying(),
                 isEnded = bridge.getIsEnded(),
-                durationMs = bridge.getDurationMs(),
+                durationMs = durationMs,
                 positionMs = bridge.getPositionMs(),
                 bufferedPositionMs = bridge.getBufferedMs(),
                 playbackSpeed = bridge.getPlaybackSpeed(),
                 videoWidth = bridge.getVideoWidth().coerceAtLeast(0),
                 videoHeight = bridge.getVideoHeight().coerceAtLeast(0),
                 mediaInfoJson = bridge.getMediaInfoJson(),
+                chapters = chapters,
             )
             latestOnSnapshot.value(snapshot)
             val errorMessage = bridge.getErrorMessage().ifBlank { null }
@@ -449,8 +532,10 @@ actual fun PlatformPlayerSurface(
 
     // Cleanup
     DisposableEffect(bridge) {
+        bridge.setSubtitleTextHandler { subtitleText = it }
         onDispose {
             InAppLogger.info("Player/iOS", "destroy bridge positionMs=${bridge.getPositionMs()} durationMs=${bridge.getDurationMs()}")
+            bridge.setSubtitleTextHandler(null)
             bridge.destroy()
         }
     }
@@ -480,6 +565,7 @@ actual fun PlatformPlayerSurface(
             },
             interactive = false,
         )
+        StyledSubtitleOverlay(subtitleText, subtitleStyle)
         
         if (useNativeController) {
             var isPlayingLocal by remember { mutableStateOf(playWhenReady) }
@@ -554,6 +640,7 @@ private fun Color.toMpvColorString(): String {
 
 private fun SubtitleStyleState.toMpvSubtitlePosition(): Int =
     (100 - (bottomOffset / 2)).coerceIn(0, 150)
+
 
 private fun SubtitleStyleState.toMpvSubtitleFontSize(): Float =
     (fontSizeSp * 3f).coerceIn(18f, 96f)

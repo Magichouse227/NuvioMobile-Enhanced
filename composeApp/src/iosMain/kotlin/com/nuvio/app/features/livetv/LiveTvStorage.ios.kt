@@ -9,9 +9,13 @@ actual object LiveTvStorage {
     private const val playlistsBlobKey = "playlists_blob"
     private const val favoriteChannelIdsBlobKey = "favorite_channel_ids_blob"
     private const val lastWatchedChannelIdKey = "last_watched_channel_id"
+    private const val recentChannelIdsBlobKey = "recent_channel_ids"
+    private const val channelViewModeKey = "channel_view_mode"
     private const val navigationEnabledKey = "navigation_enabled"
     private const val stalkerSettingsKey = "stalker_settings"
     private const val xtreamSettingsKey = "xtream_settings"
+    private const val epgSourcesBlobKey = "epg_sources_blob"
+    private const val epgAutoDetectEnabledKey = "epg_auto_detect_enabled"
     private const val nativeNavigationVisibleKey = "NuvioLiveTvNavigationVisible"
     private const val nativeNavigationDidChangeNotification = "NuvioLiveTvNavigationVisibilityDidChange"
 
@@ -41,6 +45,20 @@ actual object LiveTvStorage {
 
     actual fun saveLastWatchedChannelId(channelId: String) {
         NSUserDefaults.standardUserDefaults.setObject(channelId, forKey = ProfileScopedKey.of(lastWatchedChannelIdKey))
+    }
+
+    actual fun loadRecentChannelIdsBlob(): String? =
+        NSUserDefaults.standardUserDefaults.stringForKey(ProfileScopedKey.of(recentChannelIdsBlobKey))
+
+    actual fun saveRecentChannelIdsBlob(blob: String) {
+        NSUserDefaults.standardUserDefaults.setObject(blob, forKey = ProfileScopedKey.of(recentChannelIdsBlobKey))
+    }
+
+    actual fun loadChannelViewMode(): String? =
+        NSUserDefaults.standardUserDefaults.stringForKey(ProfileScopedKey.of(channelViewModeKey))
+
+    actual fun saveChannelViewMode(mode: String) {
+        NSUserDefaults.standardUserDefaults.setObject(mode, forKey = ProfileScopedKey.of(channelViewModeKey))
     }
 
     actual fun loadNavigationEnabled(): Boolean? {
@@ -81,6 +99,26 @@ actual object LiveTvStorage {
         NSNotificationCenter.defaultCenter.postNotificationName(
             nativeNavigationDidChangeNotification,
             null,
+        )
+    }
+
+    actual fun loadEpgSourcesBlob(): String? =
+        NSUserDefaults.standardUserDefaults.stringForKey(ProfileScopedKey.of(epgSourcesBlobKey))
+
+    actual fun saveEpgSourcesBlob(blob: String) {
+        NSUserDefaults.standardUserDefaults.setObject(blob, forKey = ProfileScopedKey.of(epgSourcesBlobKey))
+    }
+
+    actual fun loadEpgAutoDetectEnabled(): Boolean? {
+        val defaults = NSUserDefaults.standardUserDefaults
+        val key = ProfileScopedKey.of(epgAutoDetectEnabledKey)
+        return if (defaults.objectForKey(key) == null) null else defaults.boolForKey(key)
+    }
+
+    actual fun saveEpgAutoDetectEnabled(enabled: Boolean) {
+        NSUserDefaults.standardUserDefaults.setBool(
+            enabled,
+            forKey = ProfileScopedKey.of(epgAutoDetectEnabledKey),
         )
     }
 }

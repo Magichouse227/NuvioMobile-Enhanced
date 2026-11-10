@@ -10,9 +10,13 @@ actual object LiveTvStorage {
     private const val playlistsBlobKey = "playlists_blob"
     private const val favoriteChannelIdsBlobKey = "favorite_channel_ids_blob"
     private const val lastWatchedChannelIdKey = "last_watched_channel_id"
+    private const val recentChannelIdsBlobKey = "recent_channel_ids"
+    private const val channelViewModeKey = "channel_view_mode"
     private const val navigationEnabledKey = "navigation_enabled"
     private const val stalkerSettingsKey = "stalker_settings"
     private const val xtreamSettingsKey = "xtream_settings"
+    private const val epgSourcesBlobKey = "epg_sources_blob"
+    private const val epgAutoDetectEnabledKey = "epg_auto_detect_enabled"
 
     private var preferences: SharedPreferences? = null
 
@@ -60,6 +64,26 @@ actual object LiveTvStorage {
             ?.apply()
     }
 
+    actual fun loadRecentChannelIdsBlob(): String? =
+        preferences?.getString(ProfileScopedKey.of(recentChannelIdsBlobKey), null)
+
+    actual fun saveRecentChannelIdsBlob(blob: String) {
+        preferences
+            ?.edit()
+            ?.putString(ProfileScopedKey.of(recentChannelIdsBlobKey), blob)
+            ?.apply()
+    }
+
+    actual fun loadChannelViewMode(): String? =
+        preferences?.getString(ProfileScopedKey.of(channelViewModeKey), null)
+
+    actual fun saveChannelViewMode(mode: String) {
+        preferences
+            ?.edit()
+            ?.putString(ProfileScopedKey.of(channelViewModeKey), mode)
+            ?.apply()
+    }
+
     actual fun loadNavigationEnabled(): Boolean? {
         val preferences = preferences ?: return null
         val key = ProfileScopedKey.of(navigationEnabledKey)
@@ -94,4 +118,27 @@ actual object LiveTvStorage {
     }
 
     actual fun publishNavigationVisibility(visible: Boolean) = Unit
+
+    actual fun loadEpgSourcesBlob(): String? =
+        preferences?.getString(ProfileScopedKey.of(epgSourcesBlobKey), null)
+
+    actual fun saveEpgSourcesBlob(blob: String) {
+        preferences
+            ?.edit()
+            ?.putString(ProfileScopedKey.of(epgSourcesBlobKey), blob)
+            ?.apply()
+    }
+
+    actual fun loadEpgAutoDetectEnabled(): Boolean? {
+        val preferences = preferences ?: return null
+        val key = ProfileScopedKey.of(epgAutoDetectEnabledKey)
+        return if (preferences.contains(key)) preferences.getBoolean(key, true) else null
+    }
+
+    actual fun saveEpgAutoDetectEnabled(enabled: Boolean) {
+        preferences
+            ?.edit()
+            ?.putBoolean(ProfileScopedKey.of(epgAutoDetectEnabledKey), enabled)
+            ?.apply()
+    }
 }
